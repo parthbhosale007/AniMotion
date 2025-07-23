@@ -48,3 +48,24 @@ for frame_data in pose_data:
         bone.keyframe_insert(data_path="location", frame=frame_num)
 
 print("✅ Animation imported successfully!")
+
+# === EXPORT ===
+export_path = bpy.path.abspath("//output/pose_animation.fbx")  # Output relative to .blend file
+
+# Select the armature
+bpy.ops.object.select_all(action='DESELECT')
+armature.select_set(True)
+bpy.context.view_layer.objects.active = armature
+
+# Export as FBX
+bpy.ops.export_scene.fbx(
+    filepath=export_path,
+    use_selection=True,
+    apply_scale_options='FBX_SCALE_ALL',
+    bake_anim=True,
+    add_leaf_bones=False,
+    bake_anim_use_nla_strips=False,
+    bake_anim_use_all_actions=False
+)
+
+print(f"✅ Animation exported to {export_path}")
