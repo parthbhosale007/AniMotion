@@ -50,12 +50,18 @@ for frame_data in pose_data:
 print("✅ Animation imported successfully!")
 
 # === EXPORT ===
-export_path = bpy.path.abspath("//output/pose_animation.fbx")  # Output relative to .blend file
 
-# Select the armature
+# Switch to Object Mode to safely run selection/export operations
+if bpy.ops.object.mode_set.poll():
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+# Deselect all, then select the armature for export
 bpy.ops.object.select_all(action='DESELECT')
 armature.select_set(True)
 bpy.context.view_layer.objects.active = armature
+
+# Define output path
+export_path = bpy.path.abspath("//output/pose_animation.fbx")
 
 # Export as FBX
 bpy.ops.export_scene.fbx(
@@ -69,3 +75,4 @@ bpy.ops.export_scene.fbx(
 )
 
 print(f"✅ Animation exported to {export_path}")
+
