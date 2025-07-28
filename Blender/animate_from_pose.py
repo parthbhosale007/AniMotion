@@ -4,7 +4,7 @@ import os
 
 # === CONFIG ===
 json_path = bpy.path.abspath("//output/pose_data.json")
-character_path = bpy.path.abspath("//assets/T-posee.fbx")
+character_path = bpy.path.abspath("//assets/T-Pose.fbx")
 export_path = bpy.path.abspath("//output/skinned_animation.fbx")
 
 video_width, video_height = 640, 480
