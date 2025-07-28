@@ -8,8 +8,7 @@ character_path = bpy.path.abspath("//assets/character.fbx")
 export_path = bpy.path.abspath("//output/skinned_animation.fbx")
 
 video_width, video_height = 640, 480
-scale_factor = 2.0
-start_frame = 1
+scale_factor, start_frame = 1.0, 1
 
 # === Load pose data ===
 with open(json_path, "r") as f:
@@ -37,54 +36,75 @@ bpy.ops.object.mode_set(mode='POSE')
 for frame_data in pose_data:
     frame_num = frame_data["frame"] + start_frame
     for i, lm in enumerate(frame_data["landmarks"]):
-        pb = arm.pose.bones.get(f"Bone_{i}")
-        if pb:
-            x = (lm["x"] - 0.5) * video_width / 100 * scale_factor
-            y = (lm["y"] - 0.5) * video_height / 100 * scale_factor
-            z = -lm["z"] * scale_factor
-            pb.location = (x, y, z)
-            pb.keyframe_insert(data_path="location", frame=frame_num)
+        pb = arm.pose.bones[f"Bone_{i}"]
+        x = (lm["x"] - 0.5) * video_width / 100 * scale_factor
+        y = (lm["y"] - 0.5) * video_height / 100 * scale_factor
+        z = -lm["z"] * scale_factor
+        pb.location = (x, y, z)
+        pb.keyframe_insert(data_path="location", frame=frame_num)
 
 bpy.context.scene.frame_end = start_frame + num_frames
 
 # === Import character FBX ===
 bpy.ops.import_scene.fbx(filepath=character_path)
-imported = bpy.context.selected_objects
-character_rig = next((obj for obj in imported if obj.type == 'ARMATURE'), None)
-
-if character_rig is None:
-    raise RuntimeError("❌ Failed to find character armature in imported FBX.")
-
+character_rig = [obj for obj in bpy.context.selected_objects if obj.type == 'ARMATURE'][0]
 character_rig.name = "CharacterArmature"
+print(f"✅ Found armature: {character_rig.name}")
 
-# === Retarget bones: apply constraints from MediaPipe to CharacterRig ===
+# === Retarget selected bones ===
+bone_map = {
+    "Hips": 0,
+    "Spine": 11,
+    "Spine1": 12,
+    "Spine2": 23,
+    "Neck": 24,
+    "Head": 0,
+    "LeftShoulder": 11,
+    "LeftArm": 13,
+    "LeftForeArm": 15,
+    "LeftHand": 17,
+    "RightShoulder": 12,
+    "RightArm": 14,
+    "RightForeArm": 16,
+    "RightHand": 18,
+    "LeftUpLeg": 23,
+    "LeftLeg": 25,
+    "LeftFoot": 27,
+    "RightUpLeg": 24,
+    "RightLeg": 26,
+    "RightFoot": 28,
+}
+
 bpy.ops.object.select_all(action='DESELECT')
 bpy.context.view_layer.objects.active = character_rig
 bpy.ops.object.mode_set(mode='POSE')
 
-# Heuristic match by index or names
-for i in range(min(len(character_rig.pose.bones), num_landmarks)):
-    try:
-        src_bone = arm.pose.bones[f"Bone_{i}"]
-        tgt_bone = character_rig.pose.bones[i]
-
-        loc = tgt_bone.constraints.new(type='COPY_LOCATION')
-        loc.target = arm
-        loc.subtarget = src_bone.name
-
-        rot = tgt_bone.constraints.new(type='COPY_ROTATION')
-        rot.target = arm
-        rot.subtarget = src_bone.name
-    except Exception as e:
-        print(f"⚠️ Skipped bone {i}: {e}")
+for tgt_name_base, src_idx in bone_map.items():
+    tgt_name = f"mixamorig:{tgt_name_base}"
+    if tgt_name in character_rig.pose.bones:
+        tgt_bone = character_rig.pose.bones[tgt_name]
+        src_bone = arm.pose.bones.get(f"Bone_{src_idx}")
+        if src_bone:
+            loc = tgt_bone.constraints.new(type='COPY_LOCATION')
+            loc.target = arm
+            loc.subtarget = src_bone.name
+            rot = tgt_bone.constraints.new(type='COPY_ROTATION')
+            rot.target = arm
+            rot.subtarget = src_bone.name
+            print(f"🔗 Retargeted {tgt_name} to Bone_{src_idx}")
+        else:
+            print(f"⚠️ Source Bone_{src_idx} not found")
+    else:
+        print(f"⚠️ Target bone {tgt_name} not found")
 
 bpy.ops.object.mode_set(mode='OBJECT')
 
-# === Export skinned animated FBX ===
+# === Export final animated FBX ===
 bpy.ops.object.select_all(action='DESELECT')
 character_rig.select_set(True)
 bpy.context.view_layer.objects.active = character_rig
 
+print(f"\nFBX export starting... '{export_path}'")
 bpy.ops.export_scene.fbx(
     filepath=export_path,
     use_selection=True,
@@ -93,5 +113,4 @@ bpy.ops.export_scene.fbx(
     bake_anim_use_nla_strips=False,
     bake_anim_use_all_actions=False
 )
-
 print(f"✅ Exported character animation to: {export_path}")
