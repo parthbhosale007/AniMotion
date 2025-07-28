@@ -1,6 +1,8 @@
 import bpy
 import json
 import os
+import numpy as np
+from scipy.signal import savgol_filter
 
 # === CONFIG ===
 json_path = bpy.path.abspath("//output/pose_data.json")
@@ -8,7 +10,7 @@ character_path = bpy.path.abspath("//assets/character.fbx")
 export_path = bpy.path.abspath("//output/skinned_animation.fbx")
 
 video_width, video_height = 640, 480
-scale_factor, start_frame = 1.0, 1
+scale_factor, start_frame = 2.0, 1
 
 # === Load pose data ===
 with open(json_path, "r") as f:
@@ -17,6 +19,13 @@ with open(json_path, "r") as f:
 num_frames = len(pose_data)
 num_landmarks = len(pose_data[0]["landmarks"])
 print(f"✅ Loaded {num_frames} frames with {num_landmarks} landmarks per frame.")
+
+# === Smooth landmark data using Savitzky-Golay filter ===
+landmark_array = np.array([
+    [[lm["x"], lm["y"], lm["z"]] for lm in frame["landmarks"]]
+    for frame in pose_data
+])
+smoothed_array = savgol_filter(landmark_array, window_length=11, polyorder=3, axis=0)
 
 # === Create MediaPipe armature ===
 bpy.ops.object.select_all(action='DESELECT')
@@ -32,74 +41,50 @@ for i in range(num_landmarks):
 
 bpy.ops.object.mode_set(mode='POSE')
 
-# === Animate MediaPipe bones ===
-for frame_data in pose_data:
+# === Animate bones using smoothed data ===
+for frame_idx, frame_data in enumerate(pose_data):
     frame_num = frame_data["frame"] + start_frame
-    for i, lm in enumerate(frame_data["landmarks"]):
+    for i in range(num_landmarks):
         pb = arm.pose.bones[f"Bone_{i}"]
-        x = (lm["x"] - 0.5) * video_width / 100 * scale_factor
-        y = (lm["y"] - 0.5) * video_height / 100 * scale_factor
-        z = -lm["z"] * scale_factor
+        x = (smoothed_array[frame_idx, i, 0] - 0.5) * video_width / 100 * scale_factor
+        y = (smoothed_array[frame_idx, i, 1] - 0.5) * video_height / 100 * scale_factor
+        z = -smoothed_array[frame_idx, i, 2] * scale_factor
         pb.location = (x, y, z)
         pb.keyframe_insert(data_path="location", frame=frame_num)
 
 bpy.context.scene.frame_end = start_frame + num_frames
 
-# === Import character FBX ===
+# === Import character mesh ===
 bpy.ops.import_scene.fbx(filepath=character_path)
 character_rig = [obj for obj in bpy.context.selected_objects if obj.type == 'ARMATURE'][0]
 character_rig.name = "CharacterArmature"
 print(f"✅ Found armature: {character_rig.name}")
 
-# === Retarget selected bones ===
-bone_map = {
-    "Hips": 0,
-    "Spine": 11,
-    "Spine1": 12,
-    "Spine2": 23,
-    "Neck": 24,
-    "Head": 0,
-    "LeftShoulder": 11,
-    "LeftArm": 13,
-    "LeftForeArm": 15,
-    "LeftHand": 17,
-    "RightShoulder": 12,
-    "RightArm": 14,
-    "RightForeArm": 16,
-    "RightHand": 18,
-    "LeftUpLeg": 23,
-    "LeftLeg": 25,
-    "LeftFoot": 27,
-    "RightUpLeg": 24,
-    "RightLeg": 26,
-    "RightFoot": 28,
-}
+# === Print all bone names for debugging ===
+print("🔍 Bone names in character rig:")
+for i, bone in enumerate(character_rig.pose.bones):
+    print(f"{i:02d}: {bone.name}")
 
+# === Retarget animation via simple bone constraints ===
 bpy.ops.object.select_all(action='DESELECT')
 bpy.context.view_layer.objects.active = character_rig
 bpy.ops.object.mode_set(mode='POSE')
 
-for tgt_name_base, src_idx in bone_map.items():
-    tgt_name = f"mixamorig:{tgt_name_base}"
-    if tgt_name in character_rig.pose.bones:
-        tgt_bone = character_rig.pose.bones[tgt_name]
-        src_bone = arm.pose.bones.get(f"Bone_{src_idx}")
-        if src_bone:
-            loc = tgt_bone.constraints.new(type='COPY_LOCATION')
-            loc.target = arm
-            loc.subtarget = src_bone.name
-            rot = tgt_bone.constraints.new(type='COPY_ROTATION')
-            rot.target = arm
-            rot.subtarget = src_bone.name
-            print(f"🔗 Retargeted {tgt_name} to Bone_{src_idx}")
-        else:
-            print(f"⚠️ Source Bone_{src_idx} not found")
-    else:
-        print(f"⚠️ Target bone {tgt_name} not found")
+for i in range(min(len(character_rig.pose.bones), num_landmarks)):
+    src_bone = arm.pose.bones[f"Bone_{i}"]
+    tgt_bone = character_rig.pose.bones[i]
+
+    con_loc = tgt_bone.constraints.new(type='COPY_LOCATION')
+    con_loc.target = arm
+    con_loc.subtarget = src_bone.name
+
+    con_rot = tgt_bone.constraints.new(type='COPY_ROTATION')
+    con_rot.target = arm
+    con_rot.subtarget = src_bone.name
 
 bpy.ops.object.mode_set(mode='OBJECT')
 
-# === Export final animated FBX ===
+# === Export final animated mesh ===
 bpy.ops.object.select_all(action='DESELECT')
 character_rig.select_set(True)
 bpy.context.view_layer.objects.active = character_rig
