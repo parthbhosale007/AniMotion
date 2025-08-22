@@ -131,6 +131,18 @@ def bake_pose(obj, f_start, f_end):
         use_current_action=True,
         bake_types={'POSE'}
     )
+def ensure_camera():
+    if not any(obj.type == 'CAMERA' for obj in bpy.data.objects):
+        bpy.ops.object.camera_add(location=(0, -5, 2), rotation=(1.2, 0, 0))
+        cam = bpy.context.active_object
+        cam.name = "AutoCamera"
+        bpy.context.scene.camera = cam
+        print("📷 Auto-created camera.")
+    else:
+        # Use first camera found
+        cam = next(obj for obj in bpy.data.objects if obj.type == 'CAMERA')
+        bpy.context.scene.camera = cam
+        print(f"📷 Using existing camera: {cam.name}")
 
 def setup_render(fps, out_mp4, frame_end):
     s = bpy.context.scene
@@ -282,3 +294,4 @@ if RENDER_PREVIEW:
     print(f"\n🎥 Rendering MP4 preview to '{OUT_MP4}' …")
     bpy.ops.render.render(animation=True)
     print(f"✅ MP4 written: {OUT_MP4}")
+
