@@ -1,8 +1,11 @@
+import sys, os
+sys.path.append(os.path.expanduser("~/.local/lib/python3.11/site-packages"))
+
 import bpy
 import json
-import os
 import numpy as np
 from scipy.signal import savgol_filter
+
 
 # === CONFIG ===
 json_path = bpy.path.abspath("//output/pose_data.json")
