@@ -134,7 +134,7 @@ def bake_pose(obj, f_start, f_end):
 
 def setup_render(fps, out_mp4, frame_end):
     s = bpy.context.scene
-    s.render.engine = 'BLENDER_EEVEE'
+    s.render.engine = 'BLENDER_EEVEE_NEXT' 
     s.render.fps = fps
     s.frame_start = START_FRAME
     s.frame_end = START_FRAME + frame_end - 1
