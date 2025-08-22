@@ -175,7 +175,7 @@ p_lh = empties[mp_LH].matrix_world.translation
 p_rh = empties[mp_RH].matrix_world.translation
 mp_shoulder_center = mid(p_ls, p_rs)
 mp_hip_center      = mid(p_lh, p_rh)
-mp_torso_len = (mp_shoulder_center - mathutils.Vector(mp_hip_center)).length
+mp_torso_len = (mathutils.Vector(mp_shoulder_center) - mathutils.Vector(mp_hip_center)).length
 
 # Character rig distances
 hips = get_bone(rig, "mixamorig:Hips") or get_bone(rig, "Hips")
