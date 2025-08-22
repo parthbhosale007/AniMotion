@@ -4,7 +4,7 @@
 
 import bpy, json, os, math
 import numpy as np
-import matutils
+import mathutils
 
 # ------------------- CONFIG -------------------
 JSON_PATH   = bpy.path.abspath("//output/pose_data.json")
