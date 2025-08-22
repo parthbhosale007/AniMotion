@@ -76,12 +76,38 @@ def mid(a, b):
     return ( (a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0 )
 
 def ensure_camera_light():
-    # Camera
-    if not any(o for o in bpy.data.objects if o.type=="CAMERA"):
-        bpy.ops.object.camera_add(location=(4, -6, 3), rotation=(math.radians(70), 0, math.radians(35)))
-    # Light
-    if not any(o for o in bpy.data.objects if o.type=="LIGHT"):
-        bpy.ops.object.light_add(type='SUN', location=(0,0,10))
+    """Ensure at least one camera and one light exist in the scene."""
+    # --- Camera ---
+    cam = None
+    for obj in bpy.data.objects:
+        if obj.type == 'CAMERA':
+            cam = obj
+            break
+    if cam is None:
+        cam_data = bpy.data.cameras.new("AutoCamera")
+        cam = bpy.data.objects.new("AutoCamera", cam_data)
+        bpy.context.collection.objects.link(cam)
+        cam.location = (7, -7, 5)
+        cam.rotation_euler = (1.1, 0, 0.78)  # roughly facing origin
+        bpy.context.scene.camera = cam
+        print("📷 Camera created: AutoCamera")
+    else:
+        bpy.context.scene.camera = cam
+        print("📷 Using existing camera:", cam.name)
+
+    # --- Light ---
+    light = None
+    for obj in bpy.data.objects:
+        if obj.type == 'LIGHT':
+            light = obj
+            break
+    if light is None:
+        light_data = bpy.data.lights.new("AutoLight", type='SUN')
+        light = bpy.data.objects.new("AutoLight", light_data)
+        bpy.context.collection.objects.link(light)
+        light.location = (5, -5, 10)
+        print("💡 Light created: AutoLight")
+
 
 def import_mixamo(path):
     pre_objs = set(bpy.data.objects)
