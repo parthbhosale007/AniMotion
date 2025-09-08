@@ -87,7 +87,14 @@ def ensure_camera_light():
 
 def import_mixamo(path):
     pre_objs = set(bpy.data.objects)
-    bpy.ops.import_scene.fbx(filepath=path)
+    try:
+        bpy.ops.import_scene.fbx(filepath=path)
+    except RuntimeError as e:
+        if "Version 6100 unsupported" in str(e):
+            print("❌ FBX version too old! Please re-download from Mixamo or convert to newer FBX format.")
+            print("   Mixamo should export FBX 7.4 binary by default now.")
+        raise e
+    
     post_objs = set(bpy.data.objects)
     new = list(post_objs - pre_objs)
     arm = next((o for o in new if o.type=='ARMATURE'), None)
@@ -108,6 +115,43 @@ def resolve_bone(rig, name):
     if pb: return pb
     return get_bone(rig, name.split(":")[-1])
 
+
+def get_bone_rest_axis(bone):
+    """
+    Estimate the rest axis of a bone in local space.
+    Most Mixamo bones align with +Y in rest pose.
+    """
+    head = bone.bone.head_local
+    tail = bone.bone.tail_local
+    axis = (tail - head).normalized()
+    return axis
+
+def smooth_quaternions(quats, window=5):
+    """
+    Smooth a list of quaternions using a moving average with SLERP.
+    window must be odd.
+    """
+    if window < 3 or window % 2 == 0:
+        return quats
+    
+    smoothed = []
+    half = window // 2
+    n = len(quats)
+    
+    for i in range(n):
+        q_accum = quats[i]
+        count = 1
+        for j in range(1, half+1):
+            if i - j >= 0:
+                q_accum = q_accum.slerp(quats[i-j], 1.0/(count+1))
+                count += 1
+            if i + j < n:
+                q_accum = q_accum.slerp(quats[i+j], 1.0/(count+1))
+                count += 1
+        smoothed.append(q_accum)
+    return smoothed
+
+
 def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
     """
     Compute quaternion to align bone_local_axis with target_vector
@@ -124,9 +168,9 @@ def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
 
 def apply_quaternion_animation(rig, landmark_data_world, frame_count):
     """
-    Apply quaternion-based animation to Mixamo rig bones
-    landmark_data_world: dict mapping frame numbers to world positions of landmarks
+    Apply quaternion-based animation to Mixamo rig bones with improved handling
     """
+    print(f"🎬 Applying animation to {frame_count} frames...")
     bpy.context.view_layer.objects.active = rig
     bpy.ops.object.mode_set(mode='POSE')
     
@@ -138,38 +182,53 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
         'right_knee': 26, 'right_ankle': 28
     }
     
-    # Bone definitions: (bone_name, local_axis, from_landmark, to_landmark)
-    # local_axis is the direction the bone points in its rest pose
+    # Bone definitions with auto-detected axes
     bone_mappings = [
         # Spine chain
-        ("mixamorig:Spine", (0, 1, 0), 'hip_center', 'shoulder_center'),
-        ("mixamorig:Spine1", (0, 1, 0), 'hip_center', 'shoulder_center'),
-        ("mixamorig:Spine2", (0, 1, 0), 'hip_center', 'shoulder_center'),
-        ("mixamorig:Neck", (0, 1, 0), 'shoulder_center', 'nose'),
-        ("mixamorig:Head", (0, 1, 0), 'shoulder_center', 'nose'),
+        ("mixamorig:Spine", 'hip_center', 'shoulder_center'),
+        ("mixamorig:Spine1", 'hip_center', 'shoulder_center'),
+        ("mixamorig:Spine2", 'hip_center', 'shoulder_center'),
+        ("mixamorig:Neck", 'shoulder_center', 'nose'),
+        ("mixamorig:Head", 'shoulder_center', 'nose'),
         
         # Left arm
-        ("mixamorig:LeftArm", (1, 0, 0), 'left_shoulder', 'left_elbow'),
-        ("mixamorig:LeftForeArm", (1, 0, 0), 'left_elbow', 'left_wrist'),
+        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow'),
+        ("mixamorig:LeftForeArm", 'left_elbow', 'left_wrist'),
         
         # Right arm  
-        ("mixamorig:RightArm", (-1, 0, 0), 'right_shoulder', 'right_elbow'),
-        ("mixamorig:RightForeArm", (-1, 0, 0), 'right_elbow', 'right_wrist'),
+        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow'),
+        ("mixamorig:RightForeArm", 'right_elbow', 'right_wrist'),
         
         # Left leg
-        ("mixamorig:LeftUpLeg", (0, -1, 0), 'left_hip', 'left_knee'),
-        ("mixamorig:LeftLeg", (0, -1, 0), 'left_knee', 'left_ankle'),
+        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee'),
+        ("mixamorig:LeftLeg", 'left_knee', 'left_ankle'),
         
         # Right leg
-        ("mixamorig:RightUpLeg", (0, -1, 0), 'right_hip', 'right_knee'),
-        ("mixamorig:RightLeg", (0, -1, 0), 'right_knee', 'right_ankle'),
+        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee'),
+        ("mixamorig:RightLeg", 'right_knee', 'right_ankle'),
+        
+        # Hips (for rotation)
+        ("mixamorig:Hips", 'hip_center', 'shoulder_center'),
     ]
     
-    # Process each frame
+    # Pre-compute bone rest axes
+    bone_rest_axes = {}
+    bones_found = 0
+    for bone_name, from_key, to_key in bone_mappings:
+        bone = resolve_bone(rig, bone_name)
+        if bone:
+            bone_rest_axes[bone_name] = get_bone_rest_axis(bone)
+            bones_found += 1
+            print(f"✅ Found bone: {bone.name} (rest axis: {bone_rest_axes[bone_name]})")
+        else:
+            print(f"⚠️  Bone not found: {bone_name}")
+    
+    # Store all quaternions for smoothing
+    all_bone_rotations = {bone_name: [] for bone_name, _, _ in bone_mappings}
+    all_hip_positions = []
+    
+    # First pass: compute all rotations
     for frame_idx in range(frame_count):
-        frame_num = START_FRAME + frame_idx
-        bpy.context.scene.frame_set(frame_num)
-        
         # Get landmark positions for this frame
         landmarks = landmark_data_world[frame_idx]
         
@@ -196,10 +255,13 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             'right_ankle': mathutils.Vector(landmarks[mp_indices['right_ankle']]),
         }
         
-        # Apply rotations to bones
-        for bone_name, local_axis, from_key, to_key in bone_mappings:
-            bone = resolve_bone(rig, bone_name)
-            if not bone:
+        # Store hip position for smoothing
+        all_hip_positions.append(mathutils.Vector(hip_center))
+        
+        # Compute rotations for all bones
+        for bone_name, from_key, to_key in bone_mappings:
+            if bone_name not in bone_rest_axes:
+                all_bone_rotations[bone_name].append(mathutils.Quaternion())
                 continue
                 
             # Calculate target vector
@@ -207,33 +269,71 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             to_pos = positions.get(to_key)
             
             if from_pos is None or to_pos is None:
+                all_bone_rotations[bone_name].append(mathutils.Quaternion())
                 continue
                 
             target_vector = to_pos - from_pos
             
+            # Skip if vector is too small
+            if target_vector.length < 1e-6:
+                all_bone_rotations[bone_name].append(mathutils.Quaternion())
+                continue
+            
+            # Get the bone for coordinate transformation
+            bone = resolve_bone(rig, bone_name)
+            if not bone:
+                all_bone_rotations[bone_name].append(mathutils.Quaternion())
+                continue
+            
             # Convert to bone's local space
-            # We need to account for the armature's world matrix and bone's parent chain
             world_to_bone_matrix = (rig.matrix_world @ bone.bone.matrix_local).inverted()
             target_local = world_to_bone_matrix @ target_vector
             
-            # Calculate rotation quaternion
-            rotation_quat = vector_to_quaternion(target_local, local_axis)
+            # Calculate rotation quaternion using computed rest axis
+            rest_axis = bone_rest_axes[bone_name]
+            rotation_quat = vector_to_quaternion(target_local, rest_axis)
+            
+            all_bone_rotations[bone_name].append(rotation_quat)
+    
+    print("🔄 Smoothing rotations...")
+    # Smooth all rotations
+    for bone_name in all_bone_rotations:
+        if all_bone_rotations[bone_name]:  # Only smooth if we have data
+            all_bone_rotations[bone_name] = smooth_quaternions(all_bone_rotations[bone_name], 5)
+    
+    # Second pass: apply smoothed rotations
+    bones_animated = 0
+    for frame_idx in range(frame_count):
+        frame_num = START_FRAME + frame_idx
+        bpy.context.scene.frame_set(frame_num)
+        
+        # Apply smoothed rotations to bones
+        for bone_name, from_key, to_key in bone_mappings:
+            bone = resolve_bone(rig, bone_name)
+            if not bone or not all_bone_rotations[bone_name]:
+                continue
+                
+            rotation_quat = all_bone_rotations[bone_name][frame_idx]
             
             # Apply rotation
             bone.rotation_mode = 'QUATERNION'
+            
+            # Special handling for hips - also set location
+            if bone_name == "mixamorig:Hips":
+                # Convert world hip center to armature local space
+                hip_world = all_hip_positions[frame_idx]
+                hip_local = rig.matrix_world.inverted() @ hip_world
+                bone.location = hip_local
+                bone.keyframe_insert("location", frame=frame_num)
+            
             bone.rotation_quaternion = rotation_quat
             bone.keyframe_insert("rotation_quaternion", frame=frame_num)
-        
-        # Handle hips position (location only, no rotation from landmarks)
-        hips_bone = resolve_bone(rig, "mixamorig:Hips")
-        if hips_bone:
-            # Convert world hip center to armature local space
-            hip_local = rig.matrix_world.inverted() @ mathutils.Vector(hip_center)
-            hips_bone.location = hip_local
-            hips_bone.keyframe_insert("location", frame=frame_num)
+            
+            if frame_idx == 0:
+                bones_animated += 1
     
     bpy.ops.object.mode_set(mode='OBJECT')
-    print("✅ Applied quaternion-based animation to rig")
+    print(f"✅ Animation applied: {bones_animated}/{bones_found} bones animated with smoothing across {frame_count} frames")
 
 def bake_pose(obj, f_start, f_end):
     bpy.context.view_layer.objects.active = obj
