@@ -127,6 +127,39 @@ def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
     # Quaternion to rotate local_axis to target_normalized
     return local_axis.rotation_difference(target_normalized)
 
+# Mixamo correction dictionary
+BONE_CORRECTIONS = {
+    "mixamorig:Hips": {
+        "axis": (0, 1, 0),  # local Y
+        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
+    },
+    "mixamorig:Spine": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
+    },
+    "mixamorig:LeftArm": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, -90), 'XYZ').to_quaternion()
+    },
+    "mixamorig:RightArm": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, 90), 'XYZ').to_quaternion()
+    },
+    "mixamorig:LeftUpLeg": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
+    },
+    "mixamorig:RightUpLeg": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
+    },
+    "mixamorig:Head": {
+        "axis": (0, 1, 0),
+        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
+    }
+}
+
+
 def apply_quaternion_animation(rig, landmark_data_world, frame_count):
     """
     Apply quaternion-based animation to Mixamo rig bones with improved handling
@@ -231,10 +264,14 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             # Using a small rotation proportional to frame index to ensure keyframes exist:
             # test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
             quat = vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0))
+            # Apply correction if available
+            corr = BONE_CORRECTIONS.get(bone_name, mathutils.Quaternion())
+            final_quat = corr @ quat
+            
             bone.rotation_mode = 'QUATERNION'
-            bone.rotation_quaternion = quat
+            bone.rotation_quaternion = final_quat
             bone.keyframe_insert("rotation_quaternion", frame=frame_num)
-    
+
     # After we finish, set the scene range to match the full animation
     bpy.context.scene.frame_start = START_FRAME
     bpy.context.scene.frame_end   = START_FRAME + frame_count - 1
