@@ -1,195 +1,190 @@
-# Blender/auto_oneclick.py - ROBUST VERSION
-# One-click, headless: JSON -> Mixamo rig baked -> FBX + MP4
-# Requires Blender 4.x (bundled NumPy OK). No SciPy needed.
+# Blender One-Click Remy Animation Pipeline
+# Converts pose_data.json to full Mixamo character animation
+# Run this script in Blender with your character.fbx and pose_data.json ready
 
-import bpy, json, os, math
-import numpy as np
+import bpy
+import json
+import os
+import math
 import mathutils
+from mathutils import Vector, Quaternion, Euler
+import bmesh
 
-# ------------------- CONFIG -------------------
-JSON_PATH   = bpy.path.abspath("//output/pose_data.json")
-CHAR_FBX    = bpy.path.abspath("//assets/character.fbx")   # Mixamo character (T-pose)
-OUT_FBX     = bpy.path.abspath("//output/skinned_animation.fbx")
-OUT_MP4     = bpy.path.abspath("//output/anim.mp4")
+print("🎬 REMY ANIMATION PIPELINE STARTING...")
 
-VIDEO_W, VIDEO_H = 640, 480
-SCALE          = 1.0  # Reduced scale to start
-START_FRAME    = 1
-SMOOTH_WINDOW  = 5   # Reduced smoothing
-FPS            = 30
-RENDER_PREVIEW = True
-DEBUG_MODE     = True  # Enable detailed logging
-# ------------------------------------------------
+# =================== CONFIGURATION ===================
+JSON_PATH = bpy.path.abspath("//output/pose_data.json")
+CHAR_FBX = bpy.path.abspath("//assets/character.fbx") 
+OUT_FBX = bpy.path.abspath("//output/remy_animated.fbx")
+OUT_MP4 = bpy.path.abspath("//output/remy_animation.mp4")
 
-def debug_print(msg):
-    if DEBUG_MODE:
-        print(f"🔍 DEBUG: {msg}")
+# Animation settings
+FPS = 30
+SCALE_FACTOR = 8.0  # Scale up movements for visibility
+SMOOTH_FACTOR = 0.3  # Smoothing between frames
+START_FRAME = 1
 
-def safe_clear_scene():
+print(f"📁 JSON: {JSON_PATH}")
+print(f"📁 FBX: {CHAR_FBX}")
+print(f"📁 Output FBX: {OUT_FBX}")
+print(f"📁 Output MP4: {OUT_MP4}")
+
+# =================== UTILITY FUNCTIONS ===================
+def clear_scene():
+    """Complete scene cleanup"""
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete()
-    for b in bpy.data.actions: 
-        bpy.data.actions.remove(b)
-    debug_print("Scene cleared")
+    
+    # Clear all data
+    for mesh in bpy.data.meshes:
+        bpy.data.meshes.remove(mesh)
+    for armature in bpy.data.armatures:
+        bpy.data.armatures.remove(armature)
+    for action in bpy.data.actions:
+        bpy.data.actions.remove(action)
+    
+    print("🧹 Scene cleared")
 
-def load_pose_json(path):
-    with open(path, "r") as f:
+def setup_scene():
+    """Setup camera, lighting, and render settings"""
+    # Create camera
+    bpy.ops.object.camera_add(location=(10, -10, 8))
+    camera = bpy.context.active_object
+    camera.rotation_euler = (1.1, 0, 0.785)
+    bpy.context.scene.camera = camera
+    
+    # Create lighting
+    bpy.ops.object.light_add(type='SUN', location=(5, -5, 10))
+    light = bpy.context.active_object
+    light.data.energy = 3
+    
+    # Render settings
+    scene = bpy.context.scene
+    scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    scene.render.resolution_x = 1920
+    scene.render.resolution_y = 1080
+    scene.render.fps = FPS
+    
+    print("🎥 Scene setup complete")
+
+def load_pose_data(json_path):
+    """Load and validate pose data"""
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Pose data not found: {json_path}")
+    
+    with open(json_path, 'r') as f:
         data = json.load(f)
+    
     if not data:
-        raise ValueError("Pose JSON empty.")
-    debug_print(f"Loaded {len(data)} frames from JSON")
+        raise ValueError("Pose data is empty")
+    
+    print(f"📊 Loaded {len(data)} frames with {len(data[0]['landmarks'])} landmarks each")
     return data
 
-def moving_average(arr, win):
-    if win < 3 or win % 2 == 0: 
-        return arr
-    k = np.ones(win) / win
-    pad = win // 2
-    arr_p = np.pad(arr, ((pad,pad),(0,0),(0,0)), mode='edge')
-    out = np.empty_like(arr)
-    for i in range(arr.shape[2]):  # x,y,z
-        out[:,:,i] = np.apply_along_axis(lambda m: np.convolve(m, k, mode='valid'), 0, arr_p[:,:,i])
-    return out
-
-def norm_to_world(lm, sx=1, sy=1, sz=1):
-    # Improved coordinate conversion - MediaPipe to Blender world space
-    # MediaPipe: x=[0,1] left-to-right, y=[0,1] top-to-bottom, z=depth
-    # Blender: x=left-right, y=front-back, z=up-down
+def import_mixamo_character(fbx_path):
+    """Import Mixamo character and return armature"""
+    if not os.path.exists(fbx_path):
+        raise FileNotFoundError(f"Character FBX not found: {fbx_path}")
     
-    x = (lm[0] - 0.5) * 10 * SCALE * sx  # Scale to reasonable world size
-    z = (0.5 - lm[1]) * 10 * SCALE * sy  # Flip Y to Z (MediaPipe Y down = Blender Z up)
-    y = -lm[2] * 10 * SCALE * sz         # MediaPipe Z depth = Blender Y front/back
-    return (x, y, z)
-
-def mid(a, b):
-    return ((a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0)
-
-def ensure_camera_light():
-    # Clear existing cameras and lights for clean setup
-    for obj in list(bpy.data.objects):
-        if obj.type in ('CAMERA', 'LIGHT'):
-            bpy.data.objects.remove(obj)
+    print("🎭 Importing Mixamo character...")
     
-    # Create camera
-    cam_data = bpy.data.cameras.new("AutoCamera")
-    cam = bpy.data.objects.new("AutoCamera", cam_data)
-    bpy.context.collection.objects.link(cam)
-    cam.location = (15, -15, 10)
-    cam.rotation_euler = (1.1, 0, 0.78)
-    bpy.context.scene.camera = cam
-    debug_print(f"Camera created at {cam.location}")
-
-    # Create sun light
-    light_data = bpy.data.lights.new("AutoLight", type='SUN')
-    light_data.energy = 5
-    light = bpy.data.objects.new("AutoLight", light_data)
-    bpy.context.collection.objects.link(light)
-    light.location = (10, -10, 15)
-    debug_print("Sun light created")
-
-def import_mixamo_robust(path):
-    """Import Mixamo FBX and return armature + mesh objects"""
-    debug_print(f"Importing FBX: {path}")
-    pre_objs = set(bpy.data.objects)
-    
-    try:
-        bpy.ops.import_scene.fbx(
-            filepath=path,
-            use_manual_orientation=True,
-            global_scale=1.0,
-            bake_space_transform=False
-        )
-    except RuntimeError as e:
-        if "Version 6100 unsupported" in str(e):
-            print("❌ FBX version too old! Please re-download from Mixamo.")
-        raise e
-    
-    post_objs = set(bpy.data.objects)
-    new_objs = list(post_objs - pre_objs)
+    # Import FBX
+    bpy.ops.import_scene.fbx(
+        filepath=fbx_path,
+        use_manual_orientation=True,
+        global_scale=1.0,
+        bake_space_transform=False
+    )
     
     # Find armature and meshes
     armature = None
     meshes = []
     
-    for obj in new_objs:
+    for obj in bpy.context.selected_objects:
         if obj.type == 'ARMATURE':
             armature = obj
         elif obj.type == 'MESH':
             meshes.append(obj)
     
     if not armature:
-        raise RuntimeError("No armature found in FBX")
+        # Try to find armature in scene
+        for obj in bpy.data.objects:
+            if obj.type == 'ARMATURE':
+                armature = obj
+                break
     
-    armature.name = "CharacterArmature"
-    debug_print(f"Found armature: {armature.name}")
-    debug_print(f"Found {len(meshes)} mesh objects")
+    if not armature:
+        raise RuntimeError("No armature found in character FBX")
     
-    # Ensure meshes are properly bound to armature
-    for mesh in meshes:
-        mesh.name = f"CharacterMesh_{mesh.name}"
-        # Check for armature modifier
-        has_armature_mod = any(mod.type == 'ARMATURE' for mod in mesh.modifiers)
-        if not has_armature_mod:
-            arm_mod = mesh.modifiers.new("Armature", 'ARMATURE')
-            arm_mod.object = armature
-            debug_print(f"Added armature modifier to {mesh.name}")
-        
-        # Parent mesh to armature (use standard OBJECT parenting)
-        mesh.parent = armature
-        mesh.parent_type = 'ARMATURE'
-        debug_print(f"Parented {mesh.name} to armature")
+    armature.name = "RemyRig"
+    print(f"✅ Found armature: {armature.name} with {len(armature.pose.bones)} bones")
+    print(f"✅ Found {len(meshes)} mesh objects")
     
     return armature, meshes
 
-def get_bone(armature, name):
-    """Get bone from armature pose"""
-    return armature.pose.bones.get(name)
-
-def resolve_bone(armature, name):
-    """Try to find bone with various naming conventions"""
-    # Try with mixamorig: prefix
-    bone = get_bone(armature, name)
-    if bone:
-        return bone
+def get_bone_safe(armature, bone_name):
+    """Safely get bone with fallback names"""
+    # Direct lookup
+    if bone_name in armature.pose.bones:
+        return armature.pose.bones[bone_name]
     
     # Try without prefix
-    simple_name = name.split(":")[-1] if ":" in name else name
-    bone = get_bone(armature, simple_name)
-    if bone:
-        return bone
+    simple_name = bone_name.replace("mixamorig:", "")
+    if simple_name in armature.pose.bones:
+        return armature.pose.bones[simple_name]
     
     # Try common variations
     variations = [
-        name.replace("mixamorig:", ""),
-        name.replace("_", ""),
-        name.lower(),
-        name.upper()
+        bone_name.replace("_", ""),
+        bone_name.lower(),
+        bone_name.upper(),
+        f"mixamorig:{simple_name}",
+        f"{simple_name}",
     ]
     
     for var in variations:
-        bone = get_bone(armature, var)
-        if bone:
-            return bone
+        if var in armature.pose.bones:
+            return armature.pose.bones[var]
     
     return None
 
-def calculate_bone_rotation(from_pos, to_pos, rest_direction=(0, 1, 0)):
-    """Calculate rotation quaternion to align bone from rest pose to target direction"""
-    direction = to_pos - from_pos
-    if direction.length < 0.001:
-        return mathutils.Quaternion()  # Identity quaternion
+def convert_pose_to_world(landmarks, scale=SCALE_FACTOR):
+    """Convert MediaPipe normalized coordinates to Blender world space"""
+    world_landmarks = {}
     
-    direction.normalize()
-    rest_vec = mathutils.Vector(rest_direction).normalized()
+    # MediaPipe landmark indices
+    indices = {
+        'nose': 0, 'left_shoulder': 11, 'right_shoulder': 12, 
+        'left_elbow': 13, 'right_elbow': 14, 'left_wrist': 15, 'right_wrist': 16,
+        'left_hip': 23, 'right_hip': 24, 'left_knee': 25, 'right_knee': 26,
+        'left_ankle': 27, 'right_ankle': 28, 'left_foot_index': 31, 'right_foot_index': 32
+    }
     
-    # Calculate rotation from rest direction to target direction
-    rotation_quat = rest_vec.rotation_difference(direction)
-    return rotation_quat
+    for name, idx in indices.items():
+        if idx < len(landmarks):
+            lm = landmarks[idx]
+            # Convert MediaPipe [0,1] normalized coords to Blender world
+            x = (lm['x'] - 0.5) * scale
+            y = -lm['z'] * scale  # MediaPipe Z becomes Blender Y (depth)
+            z = (0.5 - lm['y']) * scale  # MediaPipe Y becomes Blender Z (flip up/down)
+            world_landmarks[name] = Vector((x, y, z))
+    
+    return world_landmarks
 
-def apply_animation_robust(armature, landmark_data, frame_count):
-    """Apply animation using improved bone mapping and rotation calculation"""
-    debug_print(f"Applying animation to {frame_count} frames")
+def calculate_direction_rotation(from_pos, to_pos, bone_rest_dir=(0, 1, 0)):
+    """Calculate rotation to point bone from one position to another"""
+    direction = (to_pos - from_pos).normalized()
+    rest_vector = Vector(bone_rest_dir).normalized()
     
+    # Calculate rotation quaternion
+    rotation = rest_vector.rotation_difference(direction)
+    return rotation
+
+def apply_remy_animation(armature, pose_frames):
+    """Apply full body animation to Remy character"""
+    print(f"🎬 Applying animation to {len(pose_frames)} frames...")
+    
+    # Set armature as active and enter pose mode
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode='POSE')
     
@@ -197,247 +192,202 @@ def apply_animation_robust(armature, landmark_data, frame_count):
     if armature.animation_data:
         armature.animation_data_clear()
     
-    # MediaPipe landmark indices
-    mp_indices = {
-        'nose': 0, 'left_eye_inner': 1, 'left_eye': 2, 'left_eye_outer': 3,
-        'right_eye_inner': 4, 'right_eye': 5, 'right_eye_outer': 6,
-        'left_ear': 7, 'right_ear': 8, 'mouth_left': 9, 'mouth_right': 10,
-        'left_shoulder': 11, 'right_shoulder': 12, 'left_elbow': 13, 'right_elbow': 14,
-        'left_wrist': 15, 'right_wrist': 16, 'left_pinky': 17, 'right_pinky': 18,
-        'left_index': 19, 'right_index': 20, 'left_thumb': 21, 'right_thumb': 22,
-        'left_hip': 23, 'right_hip': 24, 'left_knee': 25, 'right_knee': 26,
-        'left_ankle': 27, 'right_ankle': 28, 'left_heel': 29, 'right_heel': 30,
-        'left_foot_index': 31, 'right_foot_index': 32
-    }
+    # Reset all bones
+    bpy.ops.pose.select_all(action='SELECT')
+    bpy.ops.pose.rot_clear()
+    bpy.ops.pose.loc_clear()
     
-    # Enhanced bone mappings with better rest directions
-    bone_mappings = [
-        # Core bones
-        ("mixamorig:Hips", 'hip_center', 'shoulder_center', (0, 0, 1)),
-        ("mixamorig:Spine", 'hip_center', 'shoulder_center', (0, 0, 1)),
-        ("mixamorig:Spine1", 'hip_center', 'shoulder_center', (0, 0, 1)),
-        ("mixamorig:Neck", 'shoulder_center', 'nose', (0, 0, 1)),
-        ("mixamorig:Head", 'shoulder_center', 'nose', (0, 0, 1)),
+    # Define bone mapping with rest directions
+    bone_configs = [
+        # Core body
+        ('mixamorig:Hips', None, None, True),  # Root bone - gets location
+        ('mixamorig:Spine', 'left_hip|right_hip', 'left_shoulder|right_shoulder', False),
+        ('mixamorig:Spine1', 'left_hip|right_hip', 'left_shoulder|right_shoulder', False),
+        ('mixamorig:Spine2', 'left_hip|right_hip', 'left_shoulder|right_shoulder', False),
+        ('mixamorig:Neck', 'left_shoulder|right_shoulder', 'nose', False),
+        ('mixamorig:Head', 'left_shoulder|right_shoulder', 'nose', False),
         
-        # Arms
-        ("mixamorig:LeftShoulder", 'left_shoulder', 'left_elbow', (-1, 0, 0)),
-        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow', (-1, 0, 0)),
-        ("mixamorig:LeftForeArm", 'left_elbow', 'left_wrist', (-1, 0, 0)),
+        # Left arm
+        ('mixamorig:LeftShoulder', 'left_shoulder', 'left_elbow', False),
+        ('mixamorig:LeftArm', 'left_shoulder', 'left_elbow', False),
+        ('mixamorig:LeftForeArm', 'left_elbow', 'left_wrist', False),
         
-        ("mixamorig:RightShoulder", 'right_shoulder', 'right_elbow', (1, 0, 0)),
-        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow', (1, 0, 0)),
-        ("mixamorig:RightForeArm", 'right_elbow', 'right_wrist', (1, 0, 0)),
+        # Right arm  
+        ('mixamorig:RightShoulder', 'right_shoulder', 'right_elbow', False),
+        ('mixamorig:RightArm', 'right_shoulder', 'right_elbow', False),
+        ('mixamorig:RightForeArm', 'right_elbow', 'right_wrist', False),
         
-        # Legs
-        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee', (0, 0, -1)),
-        ("mixamorig:LeftLeg", 'left_knee', 'left_ankle', (0, 0, -1)),
-        ("mixamorig:LeftFoot", 'left_ankle', 'left_foot_index', (0, 1, 0)),
+        # Left leg
+        ('mixamorig:LeftUpLeg', 'left_hip', 'left_knee', False),
+        ('mixamorig:LeftLeg', 'left_knee', 'left_ankle', False),
+        ('mixamorig:LeftFoot', 'left_ankle', 'left_foot_index', False),
         
-        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee', (0, 0, -1)),
-        ("mixamorig:RightLeg", 'right_knee', 'right_ankle', (0, 0, -1)),
-        ("mixamorig:RightFoot", 'right_ankle', 'right_foot_index', (0, 1, 0)),
+        # Right leg
+        ('mixamorig:RightUpLeg', 'right_hip', 'right_knee', False),
+        ('mixamorig:RightLeg', 'right_knee', 'right_ankle', False),
+        ('mixamorig:RightFoot', 'right_ankle', 'right_foot_index', False),
     ]
     
     # Find available bones
-    available_bones = []
-    for bone_name, from_key, to_key, rest_dir in bone_mappings:
-        bone = resolve_bone(armature, bone_name)
+    active_bones = []
+    for bone_name, from_landmark, to_landmark, uses_location in bone_configs:
+        bone = get_bone_safe(armature, bone_name)
         if bone:
-            available_bones.append((bone_name, from_key, to_key, rest_dir, bone))
-            debug_print(f"✅ Found bone: {bone.name}")
+            active_bones.append((bone, from_landmark, to_landmark, uses_location))
+            print(f"✅ Will animate: {bone.name}")
         else:
-            debug_print(f"❌ Missing bone: {bone_name}")
+            print(f"⚠️  Missing: {bone_name}")
     
-    if not available_bones:
-        print("💥 ERROR: No bones found!")
-        print("Available bones in armature:")
-        for bone in armature.pose.bones[:10]:  # Show first 10
-            print(f"  - {bone.name}")
-        return
+    if not active_bones:
+        raise RuntimeError("No compatible bones found!")
     
-    debug_print(f"Will animate {len(available_bones)} bones")
+    print(f"🦴 Animating {len(active_bones)} bones")
     
-    # Process all frames
-    for frame_idx in range(frame_count):
-        frame_num = START_FRAME + frame_idx
-        bpy.context.scene.frame_set(frame_num)
+    # Process each frame
+    frame_count = len(pose_frames)
+    for frame_idx, frame_data in enumerate(pose_frames):
+        current_frame = START_FRAME + frame_idx
+        bpy.context.scene.frame_set(current_frame)
         
-        if frame_idx % 30 == 0:  # Progress every 30 frames
-            debug_print(f"Processing frame {frame_num}/{frame_count}")
+        if frame_idx % 30 == 0:
+            print(f"⏱️  Processing frame {frame_idx + 1}/{frame_count}")
         
-        # Get landmarks for this frame
-        landmarks = landmark_data[frame_idx]
+        # Convert landmarks to world positions
+        landmarks = frame_data['landmarks']
+        world_positions = convert_pose_to_world(landmarks)
         
         # Calculate derived positions
-        hip_center = mid(landmarks[mp_indices['left_hip']], landmarks[mp_indices['right_hip']])
-        shoulder_center = mid(landmarks[mp_indices['left_shoulder']], landmarks[mp_indices['right_shoulder']])
+        if 'left_hip' in world_positions and 'right_hip' in world_positions:
+            world_positions['hip_center'] = (world_positions['left_hip'] + world_positions['right_hip']) * 0.5
         
-        # Create position lookup
-        positions = {
-            'hip_center': mathutils.Vector(hip_center),
-            'shoulder_center': mathutils.Vector(shoulder_center),
-            'nose': mathutils.Vector(landmarks[mp_indices['nose']]),
-            'left_shoulder': mathutils.Vector(landmarks[mp_indices['left_shoulder']]),
-            'right_shoulder': mathutils.Vector(landmarks[mp_indices['right_shoulder']]),
-            'left_elbow': mathutils.Vector(landmarks[mp_indices['left_elbow']]),
-            'right_elbow': mathutils.Vector(landmarks[mp_indices['right_elbow']]),
-            'left_wrist': mathutils.Vector(landmarks[mp_indices['left_wrist']]),
-            'right_wrist': mathutils.Vector(landmarks[mp_indices['right_wrist']]),
-            'left_hip': mathutils.Vector(landmarks[mp_indices['left_hip']]),
-            'right_hip': mathutils.Vector(landmarks[mp_indices['right_hip']]),
-            'left_knee': mathutils.Vector(landmarks[mp_indices['left_knee']]),
-            'right_knee': mathutils.Vector(landmarks[mp_indices['right_knee']]),
-            'left_ankle': mathutils.Vector(landmarks[mp_indices['left_ankle']]),
-            'right_ankle': mathutils.Vector(landmarks[mp_indices['right_ankle']]),
-            'left_foot_index': mathutils.Vector(landmarks[mp_indices['left_foot_index']]),
-            'right_foot_index': mathutils.Vector(landmarks[mp_indices['right_foot_index']]),
-        }
+        if 'left_shoulder' in world_positions and 'right_shoulder' in world_positions:
+            world_positions['shoulder_center'] = (world_positions['left_shoulder'] + world_positions['right_shoulder']) * 0.5
         
-        # Apply bone transformations
-        for bone_name, from_key, to_key, rest_dir, bone in available_bones:
-            from_pos = positions.get(from_key)
-            to_pos = positions.get(to_key)
+        # Apply transformations to each bone
+        for bone, from_key, to_key, uses_location in active_bones:
             
-            if not from_pos or not to_pos:
-                continue
+            if uses_location and 'hip_center' in world_positions:
+                # Root bone gets location animation
+                world_pos = world_positions['hip_center']
+                local_pos = armature.matrix_world.inverted() @ world_pos
+                bone.location = local_pos
+                bone.keyframe_insert(data_path="location", frame=current_frame)
             
-            # For hips, also set location
-            if "Hips" in bone_name:
-                hip_local = armature.matrix_world.inverted() @ positions['hip_center']
-                bone.location = hip_local
-                bone.keyframe_insert("location", frame=frame_num)
-            
-            # Calculate and apply rotation
-            rotation = calculate_bone_rotation(from_pos, to_pos, rest_dir)
-            bone.rotation_mode = 'QUATERNION'
-            bone.rotation_quaternion = rotation
-            bone.keyframe_insert("rotation_quaternion", frame=frame_num)
+            if from_key and to_key:
+                # Get positions for rotation calculation
+                from_pos = None
+                to_pos = None
+                
+                # Handle combined positions (like left_hip|right_hip)
+                if '|' in from_key:
+                    keys = from_key.split('|')
+                    positions = [world_positions.get(k) for k in keys if k in world_positions]
+                    if positions:
+                        from_pos = sum(positions, Vector()) / len(positions)
+                else:
+                    from_pos = world_positions.get(from_key)
+                
+                if '|' in to_key:
+                    keys = to_key.split('|')
+                    positions = [world_positions.get(k) for k in keys if k in world_positions]
+                    if positions:
+                        to_pos = sum(positions, Vector()) / len(positions)
+                else:
+                    to_pos = world_positions.get(to_key)
+                
+                if from_pos and to_pos:
+                    # Calculate rotation
+                    rotation = calculate_direction_rotation(from_pos, to_pos)
+                    
+                    # Apply with smoothing
+                    if frame_idx > 0:
+                        # Blend with previous rotation for smoothness
+                        bone.rotation_mode = 'QUATERNION'
+                        prev_rotation = bone.rotation_quaternion.copy()
+                        new_rotation = prev_rotation.slerp(rotation, SMOOTH_FACTOR)
+                        bone.rotation_quaternion = new_rotation
+                    else:
+                        bone.rotation_mode = 'QUATERNION'
+                        bone.rotation_quaternion = rotation
+                    
+                    bone.keyframe_insert(data_path="rotation_quaternion", frame=current_frame)
     
-    bpy.ops.object.mode_set(mode='OBJECT')
-    
-    # Set scene frame range
+    # Set frame range
     bpy.context.scene.frame_start = START_FRAME
     bpy.context.scene.frame_end = START_FRAME + frame_count - 1
-    debug_print(f"Animation complete! Frames: {bpy.context.scene.frame_start}-{bpy.context.scene.frame_end}")
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    print(f"✅ Animation applied! {frame_count} frames from {START_FRAME} to {START_FRAME + frame_count - 1}")
 
-def bake_animation(armature, start_frame, end_frame):
-    """Bake the animation"""
-    debug_print(f"Baking animation frames {start_frame}-{end_frame}")
-    bpy.context.view_layer.objects.active = armature
-    try:
-        bpy.ops.nla.bake(
-            frame_start=start_frame,
-            frame_end=end_frame,
-            only_selected=False,
-            visual_keying=True,
-            clear_constraints=True,
-            use_current_action=True,
-            bake_types={'POSE'}
-        )
-        debug_print("Animation baked successfully")
-    except Exception as e:
-        debug_print(f"Baking failed: {e}")
-
-def setup_render(fps, out_mp4, frame_end):
-    s = bpy.context.scene
-    s.render.engine = 'BLENDER_EEVEE_NEXT' 
-    s.render.resolution_x = 1280
-    s.render.resolution_y = 720
-    s.render.fps = fps
-    s.frame_start = START_FRAME
-    s.frame_end = START_FRAME + frame_end - 1
-    s.render.image_settings.file_format = 'FFMPEG'
-    s.render.ffmpeg.format = 'MPEG4'
-    s.render.ffmpeg.codec = 'H264'
-    s.render.ffmpeg.constant_rate_factor = 'MEDIUM'
-    s.render.ffmpeg.ffmpeg_preset = 'GOOD'
-    s.render.filepath = out_mp4
-    debug_print("Render settings configured")
-
-def check_inputs():
-    """Check if input files exist"""
-    json_abs = bpy.path.abspath(JSON_PATH)
-    fbx_abs = bpy.path.abspath(CHAR_FBX)
+def export_results(armature, meshes):
+    """Export animated FBX and render MP4 preview"""
+    print("💾 Exporting results...")
     
-    print("\n=== INPUT CHECK ===")
-    print(f"JSON: {json_abs} {'✅' if os.path.exists(json_abs) else '❌'}")
-    print(f"FBX:  {fbx_abs} {'✅' if os.path.exists(fbx_abs) else '❌'}")
-    print(f"Blend: {bpy.data.filepath or '(unsaved)'}")
-    print("==================\n")
-    
-    if not os.path.exists(json_abs):
-        raise FileNotFoundError(f"JSON not found: {json_abs}")
-    if not os.path.exists(fbx_abs):
-        raise FileNotFoundError(f"FBX not found: {fbx_abs}")
-
-# ================= MAIN PIPELINE =================
-
-try:
-    print("🚀 Starting Blender animation pipeline...")
-    
-    # 1. Check inputs
-    check_inputs()
-    
-    # 2. Clear scene and setup
-    safe_clear_scene()
-    ensure_camera_light()
-    
-    # 3. Load and process pose data
-    pose_data = load_pose_json(JSON_PATH)
-    frame_count = len(pose_data)
-    landmark_count = len(pose_data[0]["landmarks"])
-    
-    debug_print(f"Processing {frame_count} frames, {landmark_count} landmarks each")
-    
-    # Convert to numpy array and smooth
-    arr = np.array([[[lm["x"], lm["y"], lm["z"]] for lm in f["landmarks"]] for f in pose_data])
-    arr_smoothed = moving_average(arr, SMOOTH_WINDOW)
-    
-    # Convert to world coordinates
-    landmark_world_data = {}
-    for frame_idx in range(frame_count):
-        frame_landmarks = []
-        for lm_idx in range(landmark_count):
-            world_pos = norm_to_world(arr_smoothed[frame_idx, lm_idx])
-            frame_landmarks.append(world_pos)
-        landmark_world_data[frame_idx] = frame_landmarks
-    
-    # 4. Import character
-    armature, meshes = import_mixamo_robust(CHAR_FBX)
-    
-    # 5. Apply animation
-    apply_animation_robust(armature, landmark_world_data, frame_count)
-    
-    # 6. Bake animation
-    bake_animation(armature, START_FRAME, START_FRAME + frame_count - 1)
-    
-    # 7. Export FBX
+    # Select all relevant objects
     bpy.ops.object.select_all(action='DESELECT')
     armature.select_set(True)
     for mesh in meshes:
         mesh.select_set(True)
     bpy.context.view_layer.objects.active = armature
     
-    debug_print(f"Exporting FBX with {len(meshes)} meshes...")
+    # Export FBX with animation
     bpy.ops.export_scene.fbx(
         filepath=OUT_FBX,
         use_selection=True,
         bake_anim=True,
-        add_leaf_bones=False
+        bake_anim_use_all_bones=True,
+        bake_anim_use_nla_strips=False,
+        bake_anim_use_all_actions=False,
+        add_leaf_bones=False,
+        primary_bone_axis='Y',
+        secondary_bone_axis='X'
     )
     print(f"✅ FBX exported: {OUT_FBX}")
     
-    # 8. Render preview
-    if RENDER_PREVIEW:
-        setup_render(FPS, OUT_MP4, frame_count)
-        print(f"🎥 Rendering preview...")
-        bpy.ops.render.render(animation=True)
-        print(f"✅ Video rendered: {OUT_MP4}")
+    # Setup and render MP4
+    scene = bpy.context.scene
+    scene.render.image_settings.file_format = 'FFMPEG'
+    scene.render.ffmpeg.format = 'MPEG4'
+    scene.render.ffmpeg.codec = 'H264'
+    scene.render.ffmpeg.constant_rate_factor = 'MEDIUM'
+    scene.render.filepath = OUT_MP4
     
-    print("🎉 Pipeline completed successfully!")
+    print(f"🎥 Rendering MP4 preview...")
+    bpy.ops.render.render(animation=True)
+    print(f"✅ MP4 rendered: {OUT_MP4}")
 
-except Exception as e:
-    print(f"💥 ERROR: {e}")
-    import traceback
-    traceback.print_exc()
-    raise
+# =================== MAIN EXECUTION ===================
+def run_remy_pipeline():
+    """Execute the complete Remy animation pipeline"""
+    try:
+        print("🚀 Starting Remy Animation Pipeline...")
+        
+        # Step 1: Clean and setup scene
+        clear_scene()
+        setup_scene()
+        
+        # Step 2: Load pose data
+        pose_data = load_pose_data(JSON_PATH)
+        
+        # Step 3: Import character
+        armature, meshes = import_mixamo_character(CHAR_FBX)
+        
+        # Step 4: Apply animation
+        apply_remy_animation(armature, pose_data)
+        
+        # Step 5: Export results
+        export_results(armature, meshes)
+        
+        print("🎉 REMY ANIMATION PIPELINE COMPLETED SUCCESSFULLY!")
+        print(f"📁 Animated FBX: {OUT_FBX}")
+        print(f"🎬 Preview Video: {OUT_MP4}")
+        
+    except Exception as e:
+        print(f"💥 ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+# Execute the pipeline
+if __name__ == "__main__":
+    run_remy_pipeline()
