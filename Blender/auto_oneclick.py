@@ -53,8 +53,6 @@ def mid(a, b):
     return ( (a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0 )
 
 def ensure_camera_light():
-    """Ensure at least one camera and one light exist in the scene."""
-    # --- Camera ---
     cam = None
     for obj in bpy.data.objects:
         if obj.type == 'CAMERA':
@@ -64,13 +62,12 @@ def ensure_camera_light():
         cam_data = bpy.data.cameras.new("AutoCamera")
         cam = bpy.data.objects.new("AutoCamera", cam_data)
         bpy.context.collection.objects.link(cam)
-        cam.location = (7, -7, 5)
-        cam.rotation_euler = (1.1, 0, 0.78)  # roughly facing origin
-        bpy.context.scene.camera = cam
-        print("📷 Camera created: AutoCamera")
-    else:
-        bpy.context.scene.camera = cam
-        print("📷 Using existing camera:", cam.name)
+    
+    # Position camera further away
+    cam.location = (12, -12, 8)
+    cam.rotation_euler = (1.1, 0, 0.78)  # facing toward origin
+    bpy.context.scene.camera = cam
+    print("📷 Camera positioned:", cam.location)
 
     # --- Light ---
     light = None
@@ -82,8 +79,9 @@ def ensure_camera_light():
         light_data = bpy.data.lights.new("AutoLight", type='SUN')
         light = bpy.data.objects.new("AutoLight", light_data)
         bpy.context.collection.objects.link(light)
-        light.location = (5, -5, 10)
+        light.location = (10, -10, 15)
         print("💡 Light created: AutoLight")
+
 
 def import_mixamo(path):
     pre_objs = set(bpy.data.objects)
@@ -231,9 +229,10 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
     
             # Put a simple rotation for now (replace with real quaternion math later)
             # Using a small rotation proportional to frame index to ensure keyframes exist:
-            test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
+            # test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
+            quat = vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0))
             bone.rotation_mode = 'QUATERNION'
-            bone.rotation_quaternion = test_rotation
+            bone.rotation_quaternion = quat
             bone.keyframe_insert("rotation_quaternion", frame=frame_num)
     
     # After we finish, set the scene range to match the full animation
