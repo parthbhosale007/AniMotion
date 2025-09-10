@@ -113,6 +113,21 @@ def resolve_bone(rig, name):
     if pb: return pb
     return get_bone(rig, name.split(":")[-1])
 
+def vector_to_quat(vec, rest_axis):
+    """
+    Converts a world-space vector into a quaternion aligning rest_axis -> vec.
+    """
+    vec = vec.normalized()
+    rest_axis = rest_axis.normalized()
+    rot_axis = rest_axis.cross(vec)
+    if rot_axis.length < 1e-6:  # parallel
+        return mathutils.Quaternion()
+    rot_axis.normalize()
+    angle = rest_axis.angle(vec)
+    return mathutils.Quaternion(rot_axis, angle)
+
+
+
 def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
     """
     Compute quaternion to align bone_local_axis with target_vector
@@ -131,13 +146,13 @@ def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
 GLOBAL_CORRECTION = mathutils.Euler((-1.5708, 0, 0), 'XYZ').to_quaternion()
 # Mixamo correction dictionary
 BONE_CORRECTIONS = {
-    "mixamorig:Hips":       mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
-    "mixamorig:Spine":      mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
-    "mixamorig:LeftArm":    mathutils.Euler((0, 0, -1.5708), 'XYZ').to_quaternion(),  # -90° Z
-    "mixamorig:RightArm":   mathutils.Euler((0, 0,  1.5708), 'XYZ').to_quaternion(),  # +90° Z
-    "mixamorig:LeftUpLeg":  mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
-    "mixamorig:RightUpLeg": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
-    "mixamorig:Head":       mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
+    "mixamorig:LeftArm": mathutils.Euler((0, 0, -90), 'XYZ').to_quaternion(),
+    "mixamorig:RightArm": mathutils.Euler((0, 0, 90), 'XYZ').to_quaternion(),
+    "mixamorig:Hips": mathutils.Quaternion((1,0,0,0)),  # identity
+    "mixamorig:Spine": mathutils.Quaternion((1,0,0,0)),
+    "mixamorig:LeftUpLeg": mathutils.Quaternion((1,0,0,0)),
+    "mixamorig:RightUpLeg": mathutils.Quaternion((1,0,0,0)),
+    "mixamorig:Head": mathutils.Quaternion((1,0,0,0)),
 }
 
 def apply_quaternion_animation(rig, landmark_data_world, frame_count):
@@ -243,14 +258,19 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             # Put a simple rotation for now (replace with real quaternion math later)
             # Using a small rotation proportional to frame index to ensure keyframes exist:
             # test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
-            quat = vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0))
-            # Apply correction if available
-            corr = BONE_CORRECTIONS.get(bone_name, mathutils.Quaternion())
-            final_quat = GLOBAL_CORRECTION @ corr @ quat
+            # Step: Convert landmark vector into quaternion
+            rest_axis = mathutils.Vector((0, 1, 0))  # Mixamo bones usually rest along +Y
+            quat = vector_to_quat(target_vector, rest_axis)
             
+            # Step: Apply correction
+            corr = BONE_CORRECTIONS.get(bone_name, mathutils.Quaternion((1,0,0,0)))
+            final_quat = corr @ quat
+            
+            # Step: Insert keyframe
             bone.rotation_mode = 'QUATERNION'
             bone.rotation_quaternion = final_quat
             bone.keyframe_insert("rotation_quaternion", frame=frame_num)
+
 
     # After we finish, set the scene range to match the full animation
     bpy.context.scene.frame_start = START_FRAME
