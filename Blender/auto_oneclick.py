@@ -184,24 +184,18 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
     
     print(f"✅ Will animate {len(existing_bones)} bones")
     
-    # Simple direct animation - no smoothing for now
-    for frame_idx in range(min(frame_count, 10)):  # Test first 10 frames only
+    # Simple direct animation - full range
+    for frame_idx in range(frame_count):
         frame_num = START_FRAME + frame_idx
         bpy.context.scene.frame_set(frame_num)
-        
-        print(f"🔍 Processing frame {frame_num}...")
-        
+    
         # Get landmark positions for this frame
         landmarks = landmark_data_world[frame_idx]
-        
-        # Calculate derived positions
+    
+        # Derived positions
         hip_center = mid(landmarks[mp_indices['left_hip']], landmarks[mp_indices['right_hip']])
         shoulder_center = mid(landmarks[mp_indices['left_shoulder']], landmarks[mp_indices['right_shoulder']])
-        
-        print(f"   Hip center: {hip_center}")
-        print(f"   Shoulder center: {shoulder_center}")
-        
-        # Create lookup dict for all positions
+    
         positions = {
             'hip_center': mathutils.Vector(hip_center),
             'shoulder_center': mathutils.Vector(shoulder_center),
@@ -219,48 +213,33 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             'right_knee': mathutils.Vector(landmarks[mp_indices['right_knee']]),
             'right_ankle': mathutils.Vector(landmarks[mp_indices['right_ankle']]),
         }
-        
-        # Apply to existing bones
+    
         for bone_name, from_key, to_key, bone in existing_bones:
             from_pos = positions.get(from_key)
-            to_pos = positions.get(to_key)
-            
+            to_pos   = positions.get(to_key)
             if from_pos is None or to_pos is None:
-                print(f"   ⚠️  Missing positions for {bone_name}")
                 continue
-                
             target_vector = to_pos - from_pos
-            vector_length = target_vector.length
-            
-            print(f"   {bone_name}: vector length = {vector_length:.4f}")
-            
-            if vector_length < 1e-6:
-                print(f"   ⚠️  Vector too small for {bone_name}")
+            if target_vector.length < 1e-6:
                 continue
-            
-            # For hips, set location
+    
+            # Hips: set location (converted to armature local)
             if bone_name == "mixamorig:Hips":
-                # Convert world hip center to armature local space
                 hip_local = rig.matrix_world.inverted() @ mathutils.Vector(hip_center)
                 bone.location = hip_local
                 bone.keyframe_insert("location", frame=frame_num)
-                print(f"   ✅ Set hips location: {hip_local}")
-            
-            # Try a simple rotation test - rotate bone 45 degrees around Z-axis
-            # This is just to verify keyframing works
-            test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(45 * frame_idx))
+    
+            # Put a simple rotation for now (replace with real quaternion math later)
+            # Using a small rotation proportional to frame index to ensure keyframes exist:
+            test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
             bone.rotation_mode = 'QUATERNION'
             bone.rotation_quaternion = test_rotation
             bone.keyframe_insert("rotation_quaternion", frame=frame_num)
-            print(f"   ✅ Set test rotation for {bone_name}")
     
-    bpy.ops.object.mode_set(mode='OBJECT')
-    print(f"✅ Debug animation applied - check timeline!")
-    
-    # Set scene frame range to match our animation
+    # After we finish, set the scene range to match the full animation
     bpy.context.scene.frame_start = START_FRAME
-    bpy.context.scene.frame_end = START_FRAME + min(frame_count, 10) - 1
-    print(f"✅ Set scene frame range: {bpy.context.scene.frame_start} to {bpy.context.scene.frame_end}")
+    bpy.context.scene.frame_end   = START_FRAME + frame_count - 1
+    print(f"✅ Scene frame range set: {bpy.context.scene.frame_start}..{bpy.context.scene.frame_end}")
 
 def bake_pose(obj, f_start, f_end):
     bpy.context.view_layer.objects.active = obj
@@ -327,6 +306,12 @@ L = len(pose[0]["landmarks"])
 arr = np.array([[[lm["x"], lm["y"], lm["z"]] for lm in f["landmarks"]] for f in pose], dtype=np.float32)
 arr_s = moving_average(arr, SMOOTH_WINDOW)
 
+print(f"🔍 Loaded pose JSON frames: {T}, landmarks per frame: {L}")
+# show indices of first and last frames (first landmark of each)
+print("First landmark sample:", pose[0]["landmarks"][0])
+print("Last landmark sample:", pose[-1]["landmarks"][0])
+
+
 # 2) Convert landmarks to world coordinates
 landmark_data_world = {}
 for frame_idx in range(T):
@@ -339,6 +324,38 @@ for frame_idx in range(T):
 # 3) Import character
 rig = import_mixamo(CHAR_FBX)
 print(f"✅ Mixamo rig: {rig.name}")
+
+# --- Ensure imported meshes are visible and bound to the armature ---
+imported_meshes = []
+# new objects from import may or may not be in 'new' var earlier; find meshes with no parent or with armature modifier
+for obj in bpy.data.objects:
+    if obj.type == 'MESH' and obj.name not in ("Cube",):
+        # consider it an imported mesh candidate if it shares armature modifier or is nearby
+        imported_meshes.append(obj)
+
+if not imported_meshes:
+    print("⚠️  No meshes found after FBX import. Check FBX content.")
+else:
+    print(f"🔎 Found {len(imported_meshes)} mesh(es). Making sure they use the armature...")
+for m in imported_meshes:
+    # unhide
+    m.hide_viewport = False
+    m.hide_render = False
+    m.select_set(False)
+    # ensure an armature modifier exists
+    arm_mod = None
+    for mod in m.modifiers:
+        if mod.type == 'ARMATURE':
+            arm_mod = mod
+            break
+    if arm_mod is None:
+        arm_mod = m.modifiers.new("Armature", 'ARMATURE')
+    arm_mod.object = rig
+    # parent to rig (keeps transform)
+    m.parent = rig
+    m.matrix_parent_inverse = rig.matrix_world.inverted() @ m.matrix_world
+    print(f"   ✓ Mesh '{m.name}' assigned Armature modifier -> {rig.name}")
+
 
 # 4) Auto-scale/align rig to MediaPipe data using hip/shoulder centers
 # MediaPipe indices: LShoulder=11, RShoulder=12, LHip=23, RHip=24
@@ -381,10 +398,13 @@ apply_quaternion_animation(rig, landmark_data_world, T)
 frame_end = T
 bake_pose(rig, START_FRAME, START_FRAME + frame_end - 1)
 
-# 7) Export FBX
+# 7) Export FBX (select rig + meshes)
 bpy.ops.object.select_all(action='DESELECT')
 rig.select_set(True)
+for m in imported_meshes:
+    m.select_set(True)
 bpy.context.view_layer.objects.active = rig
+
 
 print(f"\nFBX export starting… '{OUT_FBX}'")
 bpy.ops.export_scene.fbx(
