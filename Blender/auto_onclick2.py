@@ -134,9 +134,9 @@ def import_mixamo_robust(path):
             arm_mod.object = armature
             debug_print(f"Added armature modifier to {mesh.name}")
         
-        # Parent mesh to armature
+        # Parent mesh to armature (use standard OBJECT parenting)
         mesh.parent = armature
-        mesh.parent_type = 'ARMATURE_AUTO'
+        mesh.parent_type = 'ARMATURE'
         debug_print(f"Parented {mesh.name} to armature")
     
     return armature, meshes
