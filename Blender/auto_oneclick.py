@@ -399,12 +399,19 @@ frame_end = T
 bake_pose(rig, START_FRAME, START_FRAME + frame_end - 1)
 
 # 7) Export FBX (select rig + meshes)
-bpy.ops.object.select_all(action='DESELECT')
+bpy.ops.object.mode_set(mode='OBJECT', toggle=False)  # ensure OBJECT mode
+
+# Deselect everything safely (without bpy.ops)
+for obj in bpy.context.selected_objects:
+    obj.select_set(False)
+
+# Select rig + imported meshes
 rig.select_set(True)
 for m in imported_meshes:
     m.select_set(True)
-bpy.context.view_layer.objects.active = rig
 
+# Set rig as active
+bpy.context.view_layer.objects.active = rig
 
 print(f"\nFBX export starting… '{OUT_FBX}'")
 bpy.ops.export_scene.fbx(
