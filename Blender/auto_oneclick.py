@@ -129,36 +129,14 @@ def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
 
 # Mixamo correction dictionary
 BONE_CORRECTIONS = {
-    "mixamorig:Hips": {
-        "axis": (0, 1, 0),  # local Y
-        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
-    },
-    "mixamorig:Spine": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
-    },
-    "mixamorig:LeftArm": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, -90), 'XYZ').to_quaternion()
-    },
-    "mixamorig:RightArm": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, 90), 'XYZ').to_quaternion()
-    },
-    "mixamorig:LeftUpLeg": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
-    },
-    "mixamorig:RightUpLeg": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
-    },
-    "mixamorig:Head": {
-        "axis": (0, 1, 0),
-        "extra_rot": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion()
-    }
+    "mixamorig:Hips":       mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
+    "mixamorig:Spine":      mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
+    "mixamorig:LeftArm":    mathutils.Euler((0, 0, -1.5708), 'XYZ').to_quaternion(),  # -90° Z
+    "mixamorig:RightArm":   mathutils.Euler((0, 0,  1.5708), 'XYZ').to_quaternion(),  # +90° Z
+    "mixamorig:LeftUpLeg":  mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
+    "mixamorig:RightUpLeg": mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
+    "mixamorig:Head":       mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
 }
-
 
 def apply_quaternion_animation(rig, landmark_data_world, frame_count):
     """
