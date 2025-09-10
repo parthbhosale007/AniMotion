@@ -127,6 +127,8 @@ def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
     # Quaternion to rotate local_axis to target_normalized
     return local_axis.rotation_difference(target_normalized)
 
+# Global orientation correction (rotates rig from lying upside down to upright)
+GLOBAL_CORRECTION = mathutils.Euler((-1.5708, 0, 0), 'XYZ').to_quaternion()
 # Mixamo correction dictionary
 BONE_CORRECTIONS = {
     "mixamorig:Hips":       mathutils.Euler((0, 0, 0), 'XYZ').to_quaternion(),
@@ -244,7 +246,7 @@ def apply_quaternion_animation(rig, landmark_data_world, frame_count):
             quat = vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0))
             # Apply correction if available
             corr = BONE_CORRECTIONS.get(bone_name, mathutils.Quaternion())
-            final_quat = corr @ quat
+            final_quat = GLOBAL_CORRECTION @ corr @ quat
             
             bone.rotation_mode = 'QUATERNION'
             bone.rotation_quaternion = final_quat
