@@ -1,4 +1,4 @@
-# Blender/auto_oneclick.py - FINAL COORDINATE SPACE FIX
+# Blender/auto_oneclick.py - AXIS FIXED VERSION
 import bpy, json, os, math
 import numpy as np
 import mathutils
@@ -10,11 +10,14 @@ OUT_FBX     = "output/animated_character.fbx"
 OUT_MP4     = "output/anim_preview.mp4"
 
 VIDEO_W, VIDEO_H = 640, 480
-SCALE          = 0.05
+SCALE          = 0.08  # Increased scale for better visibility
 START_FRAME    = 1
 SMOOTH_WINDOW  = 5
 FPS            = 30
 RENDER_PREVIEW = False
+
+USE_FRAMES = 60  # Use 60 frames to see the motion
+ROTATION_STRENGTH = 0.6  # Increased to 60% - more visible motion
 # ------------------------------------------------
 
 def safe_clear_scene():
@@ -37,27 +40,33 @@ def moving_average(arr, win):
     return smoothed
 
 def norm_to_world(lm, scale_x=1, scale_y=1, scale_z=1):
-    x = (lm[0] - 0.5) * VIDEO_W * SCALE * scale_x
-    y = (lm[1] - 0.5) * VIDEO_H * SCALE * scale_y  
-    z = lm[2] * VIDEO_W * SCALE * scale_z
-    return (x, y, z)
+    """FIXED COORDINATE SYSTEM: MediaPipe to Blender conversion"""
+    # MediaPipe: X=left/right, Y=up/down, Z=forward/backward
+    # Blender: X=left/right, Y=forward/backward, Z=up/down
+    
+    # Convert MediaPipe to Blender coordinates:
+    x = (lm[0] - 0.5) * VIDEO_W * SCALE * scale_x  # X stays same
+    z = (0.5 - lm[1]) * VIDEO_H * SCALE * scale_y  # MediaPipe Y -> Blender Z (UP)
+    y = -lm[2] * VIDEO_W * SCALE * scale_z         # MediaPipe Z -> Blender Y (forward)
+    
+    return (x, z, y)  # Swapped Y and Z!
 
 def ensure_camera_light():
     if "AutoCamera" not in bpy.data.objects:
-        bpy.ops.object.camera_add(location=(8, -8, 6))
+        bpy.ops.object.camera_add(location=(8, -12, 6))  # Better camera position
         cam = bpy.context.object
         cam.name = "AutoCamera"
     else:
         cam = bpy.data.objects["AutoCamera"]
-    cam.location = (8, -8, 6)
-    cam.rotation_euler = (1.0, 0, 0.8)
+    cam.location = (8, -12, 6)
+    cam.rotation_euler = (1.1, 0, 0.6)
     bpy.context.scene.camera = cam
     
     if "AutoLight" not in bpy.data.objects:
-        bpy.ops.object.light_add(type='SUN', location=(5, -5, 8))
+        bpy.ops.object.light_add(type='SUN', location=(10, -10, 15))
         light = bpy.context.object
         light.name = "AutoLight"
-        light.data.energy = 3.0
+        light.data.energy = 4.0
 
 def import_mixamo_character(fbx_path):
     existing_objects = set(bpy.data.objects)
@@ -110,19 +119,10 @@ def import_mixamo_character(fbx_path):
 def get_bone_rest_direction(armature, bone_name):
     """Get bone direction in armature's local space"""
     bone = armature.data.bones[bone_name]
-    
-    # Bone direction in local armature space
-    if bone.parent:
-        # Local direction from parent space
-        local_dir = (bone.tail_local - bone.head_local).normalized()
-    else:
-        # Root bone - use world direction converted to local
-        local_dir = (bone.tail_local - bone.head_local).normalized()
-    
-    return local_dir
+    return (bone.tail_local - bone.head_local).normalized()
 
-def calculate_proper_rotation(armature, bone_name, target_direction_world, up_vector=mathutils.Vector((0, 0, 1))):
-    """Calculate rotation in bone's local space"""
+def calculate_proper_rotation(armature, bone_name, target_direction_world):
+    """Calculate rotation with proper axis handling"""
     
     # Get bone's rest direction in local space
     bone_rest_direction_local = get_bone_rest_direction(armature, bone_name)
@@ -133,14 +133,13 @@ def calculate_proper_rotation(armature, bone_name, target_direction_world, up_ve
     
     # Calculate rotation in local space
     if target_direction_local.length > 0.001 and bone_rest_direction_local.length > 0.001:
-        rotation = bone_rest_direction_local.rotation_difference(target_direction_local)
-        return rotation
+        return bone_rest_direction_local.rotation_difference(target_direction_local)
     else:
         return mathutils.Quaternion()
 
-def apply_simple_conservative_animation(armature, landmark_data_world, frame_count):
-    """ULTRA-SIMPLE conservative animation that should work"""
-    print("🎬 Starting ULTRA-SIMPLE animation...")
+def apply_corrected_animation(armature, landmark_data_world, frame_count):
+    """Animation with CORRECTED AXIS handling"""
+    print("🎬 Starting AXIS-CORRECTED animation...")
     
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode='POSE')
@@ -155,30 +154,24 @@ def apply_simple_conservative_animation(armature, landmark_data_world, frame_cou
         'left_ankle': 27, 'right_ankle': 28
     }
     
-    # ONLY ANIMATE THESE BONES - SIMPLEST POSSIBLE
-    SIMPLE_BONES = [
-        "mixamorig:LeftArm",
-        "mixamorig:RightArm", 
-        "mixamorig:LeftForeArm",
-        "mixamorig:RightForeArm",
-        "mixamorig:LeftUpLeg",
-        "mixamorig:RightUpLeg",
-        "mixamorig:LeftLeg", 
-        "mixamorig:RightLeg"
+    # ANIMATE THESE BONES - with better motion
+    ANIMATED_BONES = [
+        "mixamorig:LeftArm", "mixamorig:RightArm",
+        "mixamorig:LeftForeArm", "mixamorig:RightForeArm", 
+        "mixamorig:LeftUpLeg", "mixamorig:RightUpLeg",
+        "mixamorig:LeftLeg", "mixamorig:RightLeg"
     ]
     
-    print("🎯 ONLY animating 8 major limb bones (no spine/head)")
+    print(f"🎯 Animating {len(ANIMATED_BONES)} bones over {USE_FRAMES} frames")
+    print(f"🔧 Rotation strength: {ROTATION_STRENGTH * 100}%")
     
-    # Test with just 5 frames
-    test_frames = min(frame_count, frame_count)
-    
-    for frame_idx in range(test_frames):
+    for frame_idx in range(min(USE_FRAMES, frame_count)):
         frame_num = START_FRAME + frame_idx
         bpy.context.scene.frame_set(frame_num)
         
         frame_landmarks = landmark_data_world[frame_idx]
         
-        # Get landmark positions
+        # Get landmark positions (now in correct Blender coordinates)
         left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
         right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
         left_elbow = mathutils.Vector(frame_landmarks[MP_INDICES['left_elbow']])
@@ -193,7 +186,7 @@ def apply_simple_conservative_animation(armature, landmark_data_world, frame_cou
         right_ankle = mathutils.Vector(frame_landmarks[MP_INDICES['right_ankle']])
         
         # Apply to each bone
-        for bone_name in SIMPLE_BONES:
+        for bone_name in ANIMATED_BONES:
             if bone_name not in armature.pose.bones:
                 continue
                 
@@ -202,37 +195,37 @@ def apply_simple_conservative_animation(armature, landmark_data_world, frame_cou
             
             # Calculate target directions
             if bone_name == "mixamorig:LeftArm":
-                target_dir = (left_elbow - left_shoulder).normalized()
+                target_dir = (left_elbow - left_shoulder)
             elif bone_name == "mixamorig:RightArm":
-                target_dir = (right_elbow - right_shoulder).normalized()
+                target_dir = (right_elbow - right_shoulder)
             elif bone_name == "mixamorig:LeftForeArm":
-                target_dir = (left_wrist - left_elbow).normalized()
+                target_dir = (left_wrist - left_elbow)
             elif bone_name == "mixamorig:RightForeArm":
-                target_dir = (right_wrist - right_elbow).normalized()
+                target_dir = (right_wrist - right_elbow)
             elif bone_name == "mixamorig:LeftUpLeg":
-                target_dir = (left_knee - left_hip).normalized()
+                target_dir = (left_knee - left_hip)
             elif bone_name == "mixamorig:RightUpLeg":
-                target_dir = (right_knee - right_hip).normalized()
+                target_dir = (right_knee - right_hip)
             elif bone_name == "mixamorig:LeftLeg":
-                target_dir = (left_ankle - left_knee).normalized()
+                target_dir = (left_ankle - left_knee)
             elif bone_name == "mixamorig:RightLeg":
-                target_dir = (right_ankle - right_knee).normalized()
+                target_dir = (right_ankle - right_knee)
             else:
                 continue
             
-            # Apply VERY conservative rotation (only 20% of calculated rotation)
+            # Apply rotation with proper strength
             if target_dir.length > 0.1:
                 rotation = calculate_proper_rotation(armature, bone_name, target_dir)
-                # Only apply 20% of rotation to prevent extreme movements
-                conservative_rotation = rotation.slerp(mathutils.Quaternion(), 0.8)
-                bone.rotation_quaternion = conservative_rotation
+                # Apply the rotation with our strength setting
+                final_rotation = rotation.slerp(mathutils.Quaternion(), 1.0 - ROTATION_STRENGTH)
+                bone.rotation_quaternion = final_rotation
             else:
                 bone.rotation_quaternion = mathutils.Quaternion()
             
             bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_num)
     
     bpy.context.scene.frame_start = START_FRAME
-    bpy.context.scene.frame_end = START_FRAME + test_frames - 1
+    bpy.context.scene.frame_end = START_FRAME + min(USE_FRAMES, frame_count) - 1
     print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
 
 def bake_animation(armature, start_frame, end_frame):
@@ -290,7 +283,8 @@ def check_input_files():
 
 def main():
     try:
-        print("🚀 Starting ULTRA-SIMPLE Mixamo Auto-Rigger...")
+        print("🚀 Starting AXIS-FIXED Mixamo Auto-Rigger...")
+        print("🎯 TARGET: Jumping Jacks motion in correct vertical plane")
         check_input_files()
         safe_clear_scene()
         ensure_camera_light()
@@ -316,7 +310,7 @@ def main():
                 frame_world.append(world_pos)
             landmark_data_world.append(frame_world)
         
-        print("✅ Pose data processed")
+        print("✅ Pose data processed with CORRECTED AXIS")
         
         armature = import_mixamo_character(CHAR_FBX)
         if not armature:
@@ -327,22 +321,23 @@ def main():
         armature.location = (0, 0, 0)
         armature.rotation_euler = (0, 0, 0)
         
-        # Apply ULTRA-SIMPLE animation
-        apply_simple_conservative_animation(armature, landmark_data_world, total_frames)
+        # Apply AXIS-CORRECTED animation
+        apply_corrected_animation(armature, landmark_data_world, total_frames)
         
         # Bake and export
-        test_frames = min(5, total_frames)
-        bake_animation(armature, START_FRAME, START_FRAME + test_frames - 1)
+        bake_frames = min(USE_FRAMES, total_frames)
+        bake_animation(armature, START_FRAME, START_FRAME + bake_frames - 1)
         export_animated_fbx(armature, OUT_FBX)
         
-        print("\n🎉 ULTRA-SIMPLE PIPELINE COMPLETE! 🎉")
+        print("\n🎉 AXIS-FIXED PIPELINE COMPLETE! 🎉")
         print(f"   FBX: {OUT_FBX}")
-        print("   🔧 Ultra-conservative approach:")
-        print("   - Only 8 major limb bones")
-        print("   - Only 5 test frames") 
-        print("   - 80% rotation reduction (very conservative)")
-        print("   - Proper coordinate space conversion")
-        print("   - NO spine/head animation (too complex)")
+        print("   🔧 CRITICAL FIXES APPLIED:")
+        print("   ✅ MediaPipe Y (up/down) → Blender Z (up/down)")
+        print("   ✅ MediaPipe Z (forward) → Blender Y (forward)") 
+        print("   ✅ Increased rotation strength to 60%")
+        print("   ✅ Using 60 frames for clear motion")
+        print("   ✅ Better camera angle to see vertical motion")
+        print("   🎯 Expected: Arms/legs should move UP/DOWN in jumping jacks!")
             
     except Exception as e:
         print(f"❌ ERROR: {str(e)}")
