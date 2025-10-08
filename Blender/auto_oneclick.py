@@ -1,4 +1,4 @@
-# Blender/auto_oneclick.py - FIXED ROTATION VERSION
+# Blender/auto_oneclick.py - PROPER BONE MAPPING VERSION
 import bpy, json, os, math
 import numpy as np
 import mathutils
@@ -16,6 +16,227 @@ SMOOTH_WINDOW  = 5
 FPS            = 30
 RENDER_PREVIEW = False
 # ------------------------------------------------
+
+def analyze_bone_structure(armature):
+    """Analyze bone hierarchy and rest poses"""
+    print("\n🔬 ANALYZING BONE STRUCTURE:")
+    
+    bone_info = {}
+    
+    for bone in armature.pose.bones:
+        # Get bone in rest pose
+        data_bone = armature.data.bones[bone.name]
+        
+        # Calculate bone direction and length
+        if data_bone.parent:
+            # Local matrix gives us the bone's rest pose orientation
+            local_matrix = data_bone.matrix_local
+            head = local_matrix.translation
+            tail = local_matrix @ mathutils.Vector((0, data_bone.length, 0))
+            direction = (tail - head).normalized()
+        else:
+            # Root bone
+            direction = mathutils.Vector((0, 1, 0))  # Default Y-forward
+        
+        bone_info[bone.name] = {
+            'head': data_bone.head_local,
+            'tail': data_bone.tail_local,
+            'length': data_bone.length,
+            'direction': direction,
+            'parent': data_bone.parent.name if data_bone.parent else None,
+            'matrix': data_bone.matrix_local
+        }
+        
+        print(f"   {bone.name}:")
+        print(f"      Head: {data_bone.head_local}")
+        print(f"      Tail: {data_bone.tail_local}") 
+        print(f"      Direction: {direction}")
+        print(f"      Length: {data_bone.length:.3f}")
+        print(f"      Parent: {data_bone.parent.name if data_bone.parent else 'None'}")
+    
+    return bone_info
+
+def get_proper_bone_mappings(armature, bone_info):
+    """Create proper bone mappings based on actual rig structure"""
+    
+    # MediaPipe to Mixamo bone mapping
+    MIXAMO_MAPPINGS = {
+        # Spine chain
+        'mixamorig:Hips': {'type': 'ROOT', 'mediapipe_start': 'hip_center', 'mediapipe_end': None},
+        'mixamorig:Spine': {'type': 'SPINE', 'mediapipe_start': 'hip_center', 'mediapipe_end': 'spine_mid'},
+        'mixamorig:Spine1': {'type': 'SPINE', 'mediapipe_start': 'spine_mid', 'mediapipe_end': 'spine_upper'},
+        'mixamorig:Spine2': {'type': 'SPINE', 'mediapipe_start': 'spine_upper', 'mediapipe_end': 'neck_base'},
+        
+        # Left Arm
+        'mixamorig:LeftShoulder': {'type': 'SHOULDER', 'mediapipe_start': 'spine_upper', 'mediapipe_end': 'left_shoulder'},
+        'mixamorig:LeftArm': {'type': 'UPPER_ARM', 'mediapipe_start': 'left_shoulder', 'mediapipe_end': 'left_elbow'},
+        'mixamorig:LeftForeArm': {'type': 'LOWER_ARM', 'mediapipe_start': 'left_elbow', 'mediapipe_end': 'left_wrist'},
+        
+        # Right Arm
+        'mixamorig:RightShoulder': {'type': 'SHOULDER', 'mediapipe_start': 'spine_upper', 'mediapipe_end': 'right_shoulder'},
+        'mixamorig:RightArm': {'type': 'UPPER_ARM', 'mediapipe_start': 'right_shoulder', 'mediapipe_end': 'right_elbow'},
+        'mixamorig:RightForeArm': {'type': 'LOWER_ARM', 'mediapipe_start': 'right_elbow', 'mediapipe_end': 'right_wrist'},
+        
+        # Left Leg
+        'mixamorig:LeftUpLeg': {'type': 'UPPER_LEG', 'mediapipe_start': 'left_hip', 'mediapipe_end': 'left_knee'},
+        'mixamorig:LeftLeg': {'type': 'LOWER_LEG', 'mediapipe_start': 'left_knee', 'mediapipe_end': 'left_ankle'},
+        
+        # Right Leg
+        'mixamorig:RightUpLeg': {'type': 'UPPER_LEG', 'mediapipe_start': 'right_hip', 'mediapipe_end': 'right_knee'},
+        'mixamorig:RightLeg': {'type': 'LOWER_LEG', 'mediapipe_start': 'right_knee', 'mediapipe_end': 'right_ankle'},
+        
+        # Head
+        'mixamorig:Neck': {'type': 'NECK', 'mediapipe_start': 'neck_base', 'mediapipe_end': 'head_base'},
+        'mixamorig:Head': {'type': 'HEAD', 'mediapipe_start': 'head_base', 'mediapipe_end': 'head_top'},
+    }
+    
+    # Filter to only include bones that exist in the armature
+    valid_mappings = {}
+    for bone_name, mapping in MIXAMO_MAPPINGS.items():
+        if bone_name in armature.pose.bones:
+            valid_mappings[bone_name] = mapping
+            print(f"   ✅ Mapping: {bone_name} -> {mapping['type']}")
+        else:
+            print(f"   ❌ Missing: {bone_name}")
+    
+    return valid_mappings
+
+def calculate_proper_rotation(target_direction, bone_rest_direction, up_vector=mathutils.Vector((0, 0, 1))):
+    """Calculate proper rotation from bone's rest pose to target direction"""
+    
+    # Normalize vectors
+    target_dir = target_direction.normalized()
+    bone_dir = bone_rest_direction.normalized()
+    
+    # Handle edge cases
+    if target_dir.length < 0.001 or bone_dir.length < 0.001:
+        return mathutils.Quaternion()
+    
+    # Calculate the rotation between rest direction and target direction
+    rotation = bone_dir.rotation_difference(target_dir)
+    
+    return rotation
+
+def apply_proper_animation(armature, landmark_data_world, frame_count, bone_info, bone_mappings):
+    """Apply animation with proper bone space calculations"""
+    print("🎬 Starting PROPER animation application...")
+    
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+    armature.animation_data_clear()
+    
+    MP_INDICES = {
+        'nose': 0, 'left_eye': 1, 'right_eye': 2,
+        'left_shoulder': 11, 'right_shoulder': 12,
+        'left_elbow': 13, 'right_elbow': 14,
+        'left_wrist': 15, 'right_wrist': 16,
+        'left_hip': 23, 'right_hip': 24,
+        'left_knee': 25, 'right_knee': 26,
+        'left_ankle': 27, 'right_ankle': 28
+    }
+    
+    print(f"🎯 Animating {len(bone_mappings)} bones over {min(10, frame_count)} test frames")
+    
+    # Test with first 10 frames only
+    test_frames = min(10, frame_count)
+    
+    for frame_idx in range(test_frames):
+        frame_num = START_FRAME + frame_idx
+        bpy.context.scene.frame_set(frame_num)
+        
+        frame_landmarks = landmark_data_world[frame_idx]
+        
+        # Calculate ALL derived positions first
+        left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
+        right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
+        left_hip = mathutils.Vector(frame_landmarks[MP_INDICES['left_hip']])
+        right_hip = mathutils.Vector(frame_landmarks[MP_INDICES['right_hip']])
+        nose = mathutils.Vector(frame_landmarks[MP_INDICES['nose']])
+        
+        # Calculate spine positions based on actual proportions
+        hip_center = (left_hip + right_hip) * 0.5
+        shoulder_center = (left_shoulder + right_shoulder) * 0.5
+        
+        # Spine chain with proper proportions
+        spine_vector = shoulder_center - hip_center
+        spine_mid = hip_center + spine_vector * 0.33
+        spine_upper = hip_center + spine_vector * 0.66
+        neck_base = shoulder_center
+        head_base = shoulder_center + (nose - shoulder_center) * 0.3
+        head_top = nose
+        
+        positions = {
+            # Raw landmarks
+            'left_shoulder': left_shoulder,
+            'right_shoulder': right_shoulder,
+            'left_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['left_elbow']]),
+            'right_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['right_elbow']]),
+            'left_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['left_wrist']]),
+            'right_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['right_wrist']]),
+            'left_hip': left_hip,
+            'right_hip': right_hip,
+            'left_knee': mathutils.Vector(frame_landmarks[MP_INDICES['left_knee']]),
+            'right_knee': mathutils.Vector(frame_landmarks[MP_INDICES['right_knee']]),
+            'left_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['left_ankle']]),
+            'right_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['right_ankle']]),
+            
+            # Derived positions
+            'hip_center': hip_center,
+            'spine_mid': spine_mid,
+            'spine_upper': spine_upper,
+            'neck_base': neck_base,
+            'head_base': head_base,
+            'head_top': head_top,
+        }
+        
+        # Apply animation to each mapped bone
+        for bone_name, mapping in bone_mappings.items():
+            bone = armature.pose.bones[bone_name]
+            bone.rotation_mode = 'QUATERNION'
+            
+            bone_data = bone_info[bone_name]
+            bone_rest_direction = bone_data['direction']
+            
+            if mapping['type'] == 'ROOT':
+                # Only move hips slightly
+                hip_local = armature.matrix_world.inverted() @ hip_center
+                bone.location = hip_local * 0.3  # Reduced movement
+                bone.keyframe_insert(data_path="location", frame=frame_num)
+                bone.rotation_quaternion = mathutils.Quaternion()  # No rotation for root
+                
+            elif mapping['mediapipe_end']:
+                # Calculate target direction from MediaPipe data
+                start_pos = positions.get(mapping['mediapipe_start'])
+                end_pos = positions.get(mapping['mediapipe_end'])
+                
+                if start_pos and end_pos and (end_pos - start_pos).length > 0.01:
+                    target_direction = (end_pos - start_pos).normalized()
+                    
+                    # Calculate proper rotation
+                    rotation = calculate_proper_rotation(target_direction, bone_rest_direction)
+                    
+                    # Apply constraints based on bone type
+                    if mapping['type'] in ['SPINE', 'NECK']:
+                        # Limit spine/neck rotation
+                        rotation = rotation.slerp(mathutils.Quaternion(), 0.7)
+                    elif mapping['type'] == 'HEAD':
+                        # Limit head rotation
+                        rotation = rotation.slerp(mathutils.Quaternion(), 0.8)
+                    
+                    bone.rotation_quaternion = rotation
+                else:
+                    # Default pose if no valid direction
+                    bone.rotation_quaternion = mathutils.Quaternion()
+            
+            # Insert keyframe
+            bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_num)
+    
+    # Set scene frame range
+    bpy.context.scene.frame_start = START_FRAME
+    bpy.context.scene.frame_end = START_FRAME + test_frames - 1
+    print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
+
+# ------------------- REST OF THE FUNCTIONS (same as before) -------------------
 
 def safe_clear_scene():
     bpy.ops.object.select_all(action='SELECT')
@@ -107,182 +328,6 @@ def import_mixamo_character(fbx_path):
         print("❌ No armature found in FBX file")
         return None
 
-def get_bone(armature, bone_name):
-    if bone_name in armature.pose.bones:
-        return armature.pose.bones[bone_name]
-    return None
-
-def calculate_limb_rotation(start_pos, end_pos, up_vector=mathutils.Vector((0, 0, 1))):
-    """Better rotation calculation for limbs"""
-    if (end_pos - start_pos).length < 0.001:
-        return mathutils.Quaternion()
-    
-    # Calculate direction
-    direction = (end_pos - start_pos).normalized()
-    
-    # Calculate right vector (cross product of up and direction)
-    right = up_vector.cross(direction).normalized()
-    
-    # Recalculate proper up vector
-    up = direction.cross(right).normalized()
-    
-    # Create rotation matrix
-    rot_matrix = mathutils.Matrix((right, direction, up)).transposed()
-    
-    return rot_matrix.to_quaternion()
-
-def apply_corrected_animation(armature, landmark_data_world, frame_count):
-    """Fixed animation with proper rotations"""
-    print("🎬 Starting CORRECTED animation application...")
-    
-    bpy.context.view_layer.objects.active = armature
-    bpy.ops.object.mode_set(mode='POSE')
-    armature.animation_data_clear()
-    
-    MP_INDICES = {
-        'nose': 0, 'left_eye': 1, 'right_eye': 2,
-        'left_shoulder': 11, 'right_shoulder': 12,
-        'left_elbow': 13, 'right_elbow': 14,
-        'left_wrist': 15, 'right_wrist': 16,
-        'left_hip': 23, 'right_hip': 24,
-        'left_knee': 25, 'right_knee': 26,
-        'left_ankle': 27, 'right_ankle': 28
-    }
-    
-    # SIMPLIFIED BONE MAPPINGS - Focus on major bones first
-    BONE_MAPPINGS = [
-        # Hips - location only
-        ("mixamorig:Hips", 'hip_center', None, 'LOCATION'),
-        
-        # Spine chain
-        ("mixamorig:Spine", 'hip_center', 'spine_mid', 'ROTATION'),
-        ("mixamorig:Spine1", 'spine_mid', 'spine_upper', 'ROTATION'),
-        ("mixamorig:Spine2", 'spine_upper', 'neck_base', 'ROTATION'),
-        
-        # Arms - Left
-        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow', 'ROTATION'),
-        ("mixamorig:LeftForeArm", 'left_elbow', 'left_wrist', 'ROTATION'),
-        
-        # Arms - Right
-        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow', 'ROTATION'),
-        ("mixamorig:RightForeArm", 'right_elbow', 'right_wrist', 'ROTATION'),
-        
-        # Legs - Left
-        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee', 'ROTATION'),
-        ("mixamorig:LeftLeg", 'left_knee', 'left_ankle', 'ROTATION'),
-        
-        # Legs - Right
-        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee', 'ROTATION'),
-        ("mixamorig:RightLeg", 'right_knee', 'right_ankle', 'ROTATION'),
-        
-        # Head
-        ("mixamorig:Neck", 'neck_base', 'head_base', 'ROTATION'),
-        ("mixamorig:Head", 'head_base', 'head_top', 'ROTATION'),
-    ]
-    
-    # Find valid bones
-    valid_bones = []
-    for bone_name, start_point, end_point, anim_type in BONE_MAPPINGS:
-        bone = get_bone(armature, bone_name)
-        if bone:
-            valid_bones.append((bone, bone_name, start_point, end_point, anim_type))
-            print(f"   ✅ Bone found: {bone_name}")
-    
-    print(f"🎯 Animating {len(valid_bones)} bones over {frame_count} frames")
-    
-    # Store initial rotations for reference
-    initial_rotations = {}
-    for bone, bone_name, start_point, end_point, anim_type in valid_bones:
-        initial_rotations[bone_name] = bone.rotation_quaternion.copy()
-    
-    # Animation loop - TEST WITH FIRST 20 FRAMES
-    test_frames = min(20, frame_count)
-    for frame_idx in range(test_frames):
-        frame_num = START_FRAME + frame_idx
-        bpy.context.scene.frame_set(frame_num)
-        
-        frame_landmarks = landmark_data_world[frame_idx]
-        
-        # Calculate key positions
-        left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
-        right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
-        left_hip = mathutils.Vector(frame_landmarks[MP_INDICES['left_hip']])
-        right_hip = mathutils.Vector(frame_landmarks[MP_INDICES['right_hip']])
-        nose = mathutils.Vector(frame_landmarks[MP_INDICES['nose']])
-        
-        # Derived positions with better calculations
-        hip_center = (left_hip + right_hip) * 0.5
-        shoulder_center = (left_shoulder + right_shoulder) * 0.5
-        
-        # Spine positions with proper proportions
-        spine_height = (shoulder_center - hip_center).length
-        spine_mid = hip_center + (shoulder_center - hip_center) * 0.33
-        spine_upper = hip_center + (shoulder_center - hip_center) * 0.66
-        neck_base = shoulder_center
-        head_base = shoulder_center + (nose - shoulder_center) * 0.5
-        head_top = nose
-        
-        positions = {
-            'left_shoulder': left_shoulder,
-            'right_shoulder': right_shoulder,
-            'left_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['left_elbow']]),
-            'right_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['right_elbow']]),
-            'left_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['left_wrist']]),
-            'right_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['right_wrist']]),
-            'left_hip': left_hip,
-            'right_hip': right_hip,
-            'left_knee': mathutils.Vector(frame_landmarks[MP_INDICES['left_knee']]),
-            'right_knee': mathutils.Vector(frame_landmarks[MP_INDICES['right_knee']]),
-            'left_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['left_ankle']]),
-            'right_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['right_ankle']]),
-            'hip_center': hip_center,
-            'spine_mid': spine_mid,
-            'spine_upper': spine_upper,
-            'neck_base': neck_base,
-            'head_base': head_base,
-            'head_top': head_top,
-        }
-        
-        for bone, bone_name, start_point, end_point, anim_type in valid_bones:
-            bone.rotation_mode = 'QUATERNION'
-            
-            if anim_type == 'LOCATION' and bone_name == "mixamorig:Hips":
-                # Only move hips slightly to avoid extreme movements
-                hip_local = armature.matrix_world.inverted() @ hip_center
-                # Reduce hip movement to 50% to prevent sliding
-                reduced_location = hip_local * 0.5
-                bone.location = reduced_location
-                bone.keyframe_insert(data_path="location", frame=frame_num)
-                # Keep hips rotation neutral
-                bone.rotation_quaternion = mathutils.Quaternion()
-                
-            elif anim_type == 'ROTATION' and end_point:
-                start_pos = positions.get(start_point)
-                end_pos = positions.get(end_point)
-                
-                if start_pos and end_pos and (end_pos - start_pos).length > 0.01:
-                    # Use improved rotation calculation
-                    rotation = calculate_limb_rotation(start_pos, end_pos)
-                    
-                    # Apply rotation with constraints
-                    if "Spine" in bone_name:
-                        # Limit spine rotation
-                        rotation = rotation.slerp(mathutils.Quaternion(), 0.3)
-                    elif "Neck" in bone_name or "Head" in bone_name:
-                        # Limit head rotation
-                        rotation = rotation.slerp(mathutils.Quaternion(), 0.5)
-                    
-                    bone.rotation_quaternion = rotation
-                else:
-                    # Default pose
-                    bone.rotation_quaternion = mathutils.Quaternion()
-            
-            bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_num)
-    
-    bpy.context.scene.frame_start = START_FRAME
-    bpy.context.scene.frame_end = START_FRAME + test_frames - 1
-    print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
-
 def bake_animation(armature, start_frame, end_frame):
     print("🍳 Baking animation...")
     bpy.context.view_layer.objects.active = armature
@@ -338,7 +383,7 @@ def check_input_files():
 
 def main():
     try:
-        print("🚀 Starting IMPROVED Mixamo Auto-Rigger...")
+        print("🚀 Starting SCIENTIFIC Mixamo Auto-Rigger...")
         check_input_files()
         safe_clear_scene()
         ensure_camera_light()
@@ -375,21 +420,31 @@ def main():
         armature.location = (0, 0, 0)
         armature.rotation_euler = (0, 0, 0)
         
-        # Apply CORRECTED animation
-        apply_corrected_animation(armature, landmark_data_world, total_frames)
+        # STEP 1: Analyze bone structure
+        bone_info = analyze_bone_structure(armature)
         
-        # Bake and export
-        test_frames = min(20, total_frames)
+        # STEP 2: Create proper bone mappings
+        bone_mappings = get_proper_bone_mappings(armature, bone_info)
+        
+        if not bone_mappings:
+            print("❌ No valid bone mappings found!")
+            return
+        
+        # STEP 3: Apply proper animation
+        apply_proper_animation(armature, landmark_data_world, total_frames, bone_info, bone_mappings)
+        
+        # STEP 4: Bake and export
+        test_frames = min(10, total_frames)
         bake_animation(armature, START_FRAME, START_FRAME + test_frames - 1)
         export_animated_fbx(armature, OUT_FBX)
         
-        print("\n🎉 IMPROVED PIPELINE COMPLETE! 🎉")
+        print("\n🎉 SCIENTIFIC PIPELINE COMPLETE! 🎉")
         print(f"   FBX: {OUT_FBX}")
-        print("   🔧 Changes made:")
-        print("   - Better rotation calculations")
-        print("   - Limited hip movement")
-        print("   - Constrained spine/head rotations")
-        print("   - Testing first 20 frames only")
+        print("   🔬 Scientific approach:")
+        print("   - Analyzed bone rest poses")
+        print("   - Proper bone space calculations")
+        print("   - Correct MediaPipe to Mixamo mapping")
+        print("   - Rotation constraints based on bone type")
             
     except Exception as e:
         print(f"❌ ERROR: {str(e)}")
