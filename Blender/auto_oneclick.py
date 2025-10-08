@@ -1,4 +1,4 @@
-# Blender/auto_oneclick.py - FIXED VERSION
+# Blender/auto_oneclick.py - FIXED ROTATION VERSION
 import bpy, json, os, math
 import numpy as np
 import mathutils
@@ -14,14 +14,8 @@ SCALE          = 0.05
 START_FRAME    = 1
 SMOOTH_WINDOW  = 5
 FPS            = 30
-RENDER_PREVIEW = False  # Turn off for now to focus on FBX
+RENDER_PREVIEW = False
 # ------------------------------------------------
-
-def debug_bone_names(armature):
-    """Print all available bones for debugging"""
-    print("\n🔍 DEBUG: Available bones in armature:")
-    for i, bone in enumerate(armature.pose.bones):
-        print(f"   {i:3d}: {bone.name}")
 
 def safe_clear_scene():
     bpy.ops.object.select_all(action='SELECT')
@@ -92,9 +86,6 @@ def import_mixamo_character(fbx_path):
         armature.name = "Mixamo_Rig"
         print(f"✅ Imported armature: {armature.name}")
         
-        # Debug: Show bone names
-        debug_bone_names(armature)
-        
         meshes = []
         for obj in bpy.data.objects:
             if obj.type == 'MESH' and obj != armature:
@@ -119,33 +110,30 @@ def import_mixamo_character(fbx_path):
 def get_bone(armature, bone_name):
     if bone_name in armature.pose.bones:
         return armature.pose.bones[bone_name]
-    
-    simple_name = bone_name.replace("mixamorig:", "")
-    if simple_name in armature.pose.bones:
-        return armature.pose.bones[simple_name]
-    
-    variations = [
-        bone_name,
-        bone_name.replace("mixamorig:", ""),
-        bone_name.lower(),
-        bone_name.upper(),
-    ]
-    
-    for var in variations:
-        if var in armature.pose.bones:
-            return armature.pose.bones[var]
-    
     return None
 
-def calculate_bone_rotation(start_pos, end_pos, bone_axis=(0, 1, 0)):
+def calculate_limb_rotation(start_pos, end_pos, up_vector=mathutils.Vector((0, 0, 1))):
+    """Better rotation calculation for limbs"""
     if (end_pos - start_pos).length < 0.001:
         return mathutils.Quaternion()
-    target_direction = (end_pos - start_pos).normalized()
-    bone_axis_vector = mathutils.Vector(bone_axis).normalized()
-    return bone_axis_vector.rotation_difference(target_direction)
+    
+    # Calculate direction
+    direction = (end_pos - start_pos).normalized()
+    
+    # Calculate right vector (cross product of up and direction)
+    right = up_vector.cross(direction).normalized()
+    
+    # Recalculate proper up vector
+    up = direction.cross(right).normalized()
+    
+    # Create rotation matrix
+    rot_matrix = mathutils.Matrix((right, direction, up)).transposed()
+    
+    return rot_matrix.to_quaternion()
 
-def apply_simple_animation(armature, landmark_data_world, frame_count):
-    print("🎬 Starting animation application...")
+def apply_corrected_animation(armature, landmark_data_world, frame_count):
+    """Fixed animation with proper rotations"""
+    print("🎬 Starting CORRECTED animation application...")
     
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode='POSE')
@@ -161,117 +149,77 @@ def apply_simple_animation(armature, landmark_data_world, frame_count):
         'left_ankle': 27, 'right_ankle': 28
     }
     
-    # UPDATED BONE MAPPINGS WITH ALL COMMON VARIATIONS
+    # SIMPLIFIED BONE MAPPINGS - Focus on major bones first
     BONE_MAPPINGS = [
-        # Hips variations
-        ("Hips", 'hip_center', None),
-        ("hips", 'hip_center', None),
-        ("mixamorig:Hips", 'hip_center', None),
-        ("mixamorig1:Hips", 'hip_center', None),
-        ("Root", 'hip_center', None),
+        # Hips - location only
+        ("mixamorig:Hips", 'hip_center', None, 'LOCATION'),
         
-        # Spine variations
-        ("Spine", 'hip_center', 'spine_mid'),
-        ("spine", 'hip_center', 'spine_mid'),
-        ("mixamorig:Spine", 'hip_center', 'spine_mid'),
+        # Spine chain
+        ("mixamorig:Spine", 'hip_center', 'spine_mid', 'ROTATION'),
+        ("mixamorig:Spine1", 'spine_mid', 'spine_upper', 'ROTATION'),
+        ("mixamorig:Spine2", 'spine_upper', 'neck_base', 'ROTATION'),
         
-        ("Spine1", 'spine_mid', 'spine_upper'),
-        ("spine1", 'spine_mid', 'spine_upper'),
-        ("mixamorig:Spine1", 'spine_mid', 'spine_upper'),
+        # Arms - Left
+        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow', 'ROTATION'),
+        ("mixamorig:LeftForeArm", 'left_elbow', 'left_wrist', 'ROTATION'),
         
-        ("Spine2", 'spine_upper', 'neck_base'),
-        ("spine2", 'spine_upper', 'neck_base'),
-        ("mixamorig:Spine2", 'spine_upper', 'neck_base'),
+        # Arms - Right
+        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow', 'ROTATION'),
+        ("mixamorig:RightForeArm", 'right_elbow', 'right_wrist', 'ROTATION'),
         
-        # Left Arm
-        ("LeftArm", 'left_shoulder', 'left_elbow'),
-        ("leftArm", 'left_shoulder', 'left_elbow'),
-        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow'),
-        ("Arm_L", 'left_shoulder', 'left_elbow'),
-        ("arm_l", 'left_shoulder', 'left_elbow'),
+        # Legs - Left
+        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee', 'ROTATION'),
+        ("mixamorig:LeftLeg", 'left_knee', 'left_ankle', 'ROTATION'),
         
-        ("LeftForeArm", 'left_elbow', 'left_wrist'),
-        ("leftForeArm", 'left_elbow', 'left_wrist'),
-        ("mixamorig:LeftForeArm", 'left_elbow', 'left_wrist'),
-        ("ForeArm_L", 'left_elbow', 'left_wrist'),
-        ("forearm_l", 'left_elbow', 'left_wrist'),
-        
-        # Right Arm
-        ("RightArm", 'right_shoulder', 'right_elbow'),
-        ("rightArm", 'right_shoulder', 'right_elbow'),
-        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow'),
-        ("Arm_R", 'right_shoulder', 'right_elbow'),
-        ("arm_r", 'right_shoulder', 'right_elbow'),
-        
-        ("RightForeArm", 'right_elbow', 'right_wrist'),
-        ("rightForeArm", 'right_elbow', 'right_wrist'),
-        ("mixamorig:RightForeArm", 'right_elbow', 'right_wrist'),
-        ("ForeArm_R", 'right_elbow', 'right_wrist'),
-        ("forearm_r", 'right_elbow', 'right_wrist'),
-        
-        # Left Leg
-        ("LeftUpLeg", 'left_hip', 'left_knee'),
-        ("leftUpLeg", 'left_hip', 'left_knee'),
-        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee'),
-        ("UpLeg_L", 'left_hip', 'left_knee'),
-        ("upleg_l", 'left_hip', 'left_knee'),
-        
-        ("LeftLeg", 'left_knee', 'left_ankle'),
-        ("leftLeg", 'left_knee', 'left_ankle'),
-        ("mixamorig:LeftLeg", 'left_knee', 'left_ankle'),
-        ("Leg_L", 'left_knee', 'left_ankle'),
-        ("leg_l", 'left_knee', 'left_ankle'),
-        
-        # Right Leg
-        ("RightUpLeg", 'right_hip', 'right_knee'),
-        ("rightUpLeg", 'right_hip', 'right_knee'),
-        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee'),
-        ("UpLeg_R", 'right_hip', 'right_knee'),
-        ("upleg_r", 'right_hip', 'right_knee'),
-        
-        ("RightLeg", 'right_knee', 'right_ankle'),
-        ("rightLeg", 'right_knee', 'right_ankle'),
-        ("mixamorig:RightLeg", 'right_knee', 'right_ankle'),
-        ("Leg_R", 'right_knee', 'right_ankle'),
-        ("leg_r", 'right_knee', 'right_ankle'),
+        # Legs - Right
+        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee', 'ROTATION'),
+        ("mixamorig:RightLeg", 'right_knee', 'right_ankle', 'ROTATION'),
         
         # Head
-        ("Neck", 'neck_base', 'head_base'),
-        ("neck", 'neck_base', 'head_base'),
-        ("mixamorig:Neck", 'neck_base', 'head_base'),
-        
-        ("Head", 'head_base', 'head_top'),
-        ("head", 'head_base', 'head_top'),
-        ("mixamorig:Head", 'head_base', 'head_top'),
+        ("mixamorig:Neck", 'neck_base', 'head_base', 'ROTATION'),
+        ("mixamorig:Head", 'head_base', 'head_top', 'ROTATION'),
     ]
     
     # Find valid bones
     valid_bones = []
-    for bone_name, start_point, end_point in BONE_MAPPINGS:
+    for bone_name, start_point, end_point, anim_type in BONE_MAPPINGS:
         bone = get_bone(armature, bone_name)
         if bone:
-            valid_bones.append((bone, bone_name, start_point, end_point))
+            valid_bones.append((bone, bone_name, start_point, end_point, anim_type))
             print(f"   ✅ Bone found: {bone_name}")
     
     print(f"🎯 Animating {len(valid_bones)} bones over {frame_count} frames")
     
-    # Animation loop
-    for frame_idx in range(min(10, frame_count)):  # Test with first 10 frames
-        bpy.context.scene.frame_set(START_FRAME + frame_idx)
+    # Store initial rotations for reference
+    initial_rotations = {}
+    for bone, bone_name, start_point, end_point, anim_type in valid_bones:
+        initial_rotations[bone_name] = bone.rotation_quaternion.copy()
+    
+    # Animation loop - TEST WITH FIRST 20 FRAMES
+    test_frames = min(20, frame_count)
+    for frame_idx in range(test_frames):
+        frame_num = START_FRAME + frame_idx
+        bpy.context.scene.frame_set(frame_num)
         
         frame_landmarks = landmark_data_world[frame_idx]
+        
+        # Calculate key positions
         left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
         right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
         left_hip = mathutils.Vector(frame_landmarks[MP_INDICES['left_hip']])
         right_hip = mathutils.Vector(frame_landmarks[MP_INDICES['right_hip']])
         nose = mathutils.Vector(frame_landmarks[MP_INDICES['nose']])
         
+        # Derived positions with better calculations
         hip_center = (left_hip + right_hip) * 0.5
         shoulder_center = (left_shoulder + right_shoulder) * 0.5
-        spine_mid = (hip_center + shoulder_center) * 0.5
-        spine_upper = shoulder_center
-        neck_base = shoulder_center + (nose - shoulder_center) * 0.3
-        head_base = shoulder_center + (nose - shoulder_center) * 0.6
+        
+        # Spine positions with proper proportions
+        spine_height = (shoulder_center - hip_center).length
+        spine_mid = hip_center + (shoulder_center - hip_center) * 0.33
+        spine_upper = hip_center + (shoulder_center - hip_center) * 0.66
+        neck_base = shoulder_center
+        head_base = shoulder_center + (nose - shoulder_center) * 0.5
         head_top = nose
         
         positions = {
@@ -295,29 +243,44 @@ def apply_simple_animation(armature, landmark_data_world, frame_count):
             'head_top': head_top,
         }
         
-        for bone, bone_name, start_point, end_point in valid_bones:
+        for bone, bone_name, start_point, end_point, anim_type in valid_bones:
             bone.rotation_mode = 'QUATERNION'
             
-            if bone_name.lower() in ['hips', 'root']:
-                bone_location = armature.matrix_world.inverted() @ hip_center
-                bone.location = bone_location
-                bone.keyframe_insert(data_path="location", frame=START_FRAME + frame_idx)
+            if anim_type == 'LOCATION' and bone_name == "mixamorig:Hips":
+                # Only move hips slightly to avoid extreme movements
+                hip_local = armature.matrix_world.inverted() @ hip_center
+                # Reduce hip movement to 50% to prevent sliding
+                reduced_location = hip_local * 0.5
+                bone.location = reduced_location
+                bone.keyframe_insert(data_path="location", frame=frame_num)
+                # Keep hips rotation neutral
                 bone.rotation_quaternion = mathutils.Quaternion()
-            elif end_point:
+                
+            elif anim_type == 'ROTATION' and end_point:
                 start_pos = positions.get(start_point)
                 end_pos = positions.get(end_point)
-                if start_pos and end_pos:
-                    rotation = calculate_bone_rotation(start_pos, end_pos)
+                
+                if start_pos and end_pos and (end_pos - start_pos).length > 0.01:
+                    # Use improved rotation calculation
+                    rotation = calculate_limb_rotation(start_pos, end_pos)
+                    
+                    # Apply rotation with constraints
+                    if "Spine" in bone_name:
+                        # Limit spine rotation
+                        rotation = rotation.slerp(mathutils.Quaternion(), 0.3)
+                    elif "Neck" in bone_name or "Head" in bone_name:
+                        # Limit head rotation
+                        rotation = rotation.slerp(mathutils.Quaternion(), 0.5)
+                    
                     bone.rotation_quaternion = rotation
                 else:
+                    # Default pose
                     bone.rotation_quaternion = mathutils.Quaternion()
-            else:
-                bone.rotation_quaternion = mathutils.Quaternion()
             
-            bone.keyframe_insert(data_path="rotation_quaternion", frame=START_FRAME + frame_idx)
+            bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_num)
     
     bpy.context.scene.frame_start = START_FRAME
-    bpy.context.scene.frame_end = START_FRAME + min(10, frame_count) - 1
+    bpy.context.scene.frame_end = START_FRAME + test_frames - 1
     print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
 
 def bake_animation(armature, start_frame, end_frame):
@@ -375,7 +338,7 @@ def check_input_files():
 
 def main():
     try:
-        print("🚀 Starting Mixamo Auto-Rigger...")
+        print("🚀 Starting IMPROVED Mixamo Auto-Rigger...")
         check_input_files()
         safe_clear_scene()
         ensure_camera_light()
@@ -408,15 +371,25 @@ def main():
             print("❌ Failed to import character")
             return
         
+        # Reset character position
         armature.location = (0, 0, 0)
         armature.rotation_euler = (0, 0, 0)
         
-        apply_simple_animation(armature, landmark_data_world, total_frames)
-        bake_animation(armature, START_FRAME, START_FRAME + min(10, total_frames) - 1)
+        # Apply CORRECTED animation
+        apply_corrected_animation(armature, landmark_data_world, total_frames)
+        
+        # Bake and export
+        test_frames = min(20, total_frames)
+        bake_animation(armature, START_FRAME, START_FRAME + test_frames - 1)
         export_animated_fbx(armature, OUT_FBX)
         
-        print("\n🎉 PIPELINE COMPLETE! 🎉")
+        print("\n🎉 IMPROVED PIPELINE COMPLETE! 🎉")
         print(f"   FBX: {OUT_FBX}")
+        print("   🔧 Changes made:")
+        print("   - Better rotation calculations")
+        print("   - Limited hip movement")
+        print("   - Constrained spine/head rotations")
+        print("   - Testing first 20 frames only")
             
     except Exception as e:
         print(f"❌ ERROR: {str(e)}")
