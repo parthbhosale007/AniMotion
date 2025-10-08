@@ -8,7 +8,7 @@ import mathutils
 
 # ------------------- CONFIG -------------------
 JSON_PATH   = bpy.path.abspath("//output/pose_data.json")
-CHAR_FBX    = bpy.path.abspath("//assets/character.fbx")   # Mixamo character (T-pose)
+CHAR_FBX    = bpy.path.abspath("//assets/Remy.fbx")   # Mixamo character (T-pose)
 OUT_FBX     = bpy.path.abspath("//output/skinned_animation.fbx")
 OUT_MP4     = bpy.path.abspath("//output/anim.mp4")
 
