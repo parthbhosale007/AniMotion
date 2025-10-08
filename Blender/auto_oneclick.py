@@ -138,7 +138,7 @@ def apply_proper_animation(armature, landmark_data_world, frame_count, bone_info
     print(f"🎯 Animating {len(bone_mappings)} bones over {min(10, frame_count)} test frames")
     
     # Test with first 10 frames only
-    test_frames = min(10, frame_count)
+    test_frames = min(frame_count, frame_count)
     
     for frame_idx in range(test_frames):
         frame_num = START_FRAME + frame_idx
