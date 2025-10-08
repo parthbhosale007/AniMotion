@@ -170,7 +170,7 @@ def apply_simple_conservative_animation(armature, landmark_data_world, frame_cou
     print("🎯 ONLY animating 8 major limb bones (no spine/head)")
     
     # Test with just 5 frames
-    test_frames = min(5, frame_count)
+    test_frames = min(frame_count, frame_count)
     
     for frame_idx in range(test_frames):
         frame_num = START_FRAME + frame_idx
