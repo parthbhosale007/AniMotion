@@ -1,6 +1,6 @@
 # Blender/auto_oneclick.py
 # One-click, headless: JSON -> Mixamo rig baked -> FBX + MP4
-# Requires Blender 4.x (bundled NumPy OK). No SciPy needed.
+# Requires Blender 4.x (bundled NumPy OK)
 
 import bpy, json, os, math
 import numpy as np
@@ -13,457 +13,472 @@ OUT_FBX     = bpy.path.abspath("//output/skinned_animation.fbx")
 OUT_MP4     = bpy.path.abspath("//output/anim.mp4")
 
 VIDEO_W, VIDEO_H = 640, 480
-SCALE          = 2.0
+SCALE          = 0.05  # Reduced scale for better fitting
 START_FRAME    = 1
-SMOOTH_WINDOW  = 9   # odd, >=3
+SMOOTH_WINDOW  = 5     # Smaller smoothing window
 FPS            = 30
-RENDER_PREVIEW = True   # set False to skip MP4
+RENDER_PREVIEW = True
 # ------------------------------------------------
 
 def safe_clear_scene():
+    """Clear scene properly"""
     bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
-    for b in bpy.data.actions: bpy.data.actions.remove(b)
+    bpy.ops.object.delete(use_global=False)
+    # Clear orphan data
+    for block in [bpy.data.actions, bpy.data.meshes, bpy.data.materials]:
+        for item in block:
+            if not item.users:
+                block.remove(item)
 
 def load_pose_json(path):
+    """Load and validate pose JSON"""
     with open(path, "r") as f:
         data = json.load(f)
+    
     if not data:
         raise ValueError("Pose JSON empty.")
+    
+    print(f"📁 Loaded {len(data)} frames, {len(data[0]['landmarks'])} landmarks each")
     return data
 
 def moving_average(arr, win):
-    if win < 3 or win % 2 == 0: return arr
-    k = np.ones(win) / win
-    # pad at ends to keep same length
-    pad = win // 2
-    arr_p = np.pad(arr, ((pad,pad),(0,0),(0,0)), mode='edge')
-    out = np.empty_like(arr)
-    for i in range(arr.shape[2]):  # x,y,z
-        out[:,:,i] = np.apply_along_axis(lambda m: np.convolve(m, k, mode='valid'), 0, arr_p[:,:,i])
-    return out
+    """Simple smoothing"""
+    if win < 3:
+        return arr
+    
+    padded = np.pad(arr, ((win//2, win//2), (0,0), (0,0)), mode='edge')
+    smoothed = np.zeros_like(arr)
+    
+    for i in range(arr.shape[0]):
+        smoothed[i] = np.mean(padded[i:i+win], axis=0)
+    
+    return smoothed
 
-def norm_to_world(lm, sx, sy, sz):
-    x = (lm[0] - 0.5) * VIDEO_W / 100.0 * SCALE * sx
-    y = (lm[1] - 0.5) * VIDEO_H / 100.0 * SCALE * sy
-    z = -lm[2] * SCALE * sz
+def norm_to_world(lm, scale_x=1, scale_y=1, scale_z=1):
+    """Convert normalized MediaPipe coordinates to world space"""
+    x = (lm[0] - 0.5) * VIDEO_W * SCALE * scale_x
+    y = (lm[1] - 0.5) * VIDEO_H * SCALE * scale_y  
+    z = lm[2] * VIDEO_W * SCALE * scale_z  # Positive Z up
+    
     return (x, y, z)
 
-def mid(a, b):
-    return ( (a[0]+b[0])/2.0, (a[1]+b[1])/2.0, (a[2]+b[2])/2.0 )
-
 def ensure_camera_light():
-    cam = None
-    for obj in bpy.data.objects:
-        if obj.type == 'CAMERA':
-            cam = obj
-            break
-    if cam is None:
-        cam_data = bpy.data.cameras.new("AutoCamera")
-        cam = bpy.data.objects.new("AutoCamera", cam_data)
-        bpy.context.collection.objects.link(cam)
+    """Setup camera and lighting"""
+    # Camera
+    if "AutoCamera" not in bpy.data.objects:
+        bpy.ops.object.camera_add(location=(8, -8, 6))
+        cam = bpy.context.object
+        cam.name = "AutoCamera"
+    else:
+        cam = bpy.data.objects["AutoCamera"]
     
-    # Position camera further away
-    cam.location = (12, -12, 8)
-    cam.rotation_euler = (1.1, 0, 0.78)  # facing toward origin
+    cam.location = (8, -8, 6)
+    cam.rotation_euler = (1.0, 0, 0.8)
     bpy.context.scene.camera = cam
-    print("📷 Camera positioned:", cam.location)
+    
+    # Light
+    if "AutoLight" not in bpy.data.objects:
+        bpy.ops.object.light_add(type='SUN', location=(5, -5, 8))
+        light = bpy.context.object
+        light.name = "AutoLight"
+        light.data.energy = 3.0
+    
+    print("✅ Camera & light setup complete")
 
-    # --- Light ---
-    light = None
-    for obj in bpy.data.objects:
-        if obj.type == 'LIGHT':
-            light = obj
-            break
-    if light is None:
-        light_data = bpy.data.lights.new("AutoLight", type='SUN')
-        light = bpy.data.objects.new("AutoLight", light_data)
-        bpy.context.collection.objects.link(light)
-        light.location = (10, -10, 15)
-        print("💡 Light created: AutoLight")
-
-
-def import_mixamo(path):
-    pre_objs = set(bpy.data.objects)
+def import_mixamo_character(fbx_path):
+    """Import Mixamo character and find armature"""
+    # Store existing objects
+    existing_objects = set(bpy.data.objects)
+    
+    # Import FBX
     try:
-        bpy.ops.import_scene.fbx(filepath=path)
-    except RuntimeError as e:
-        if "Version 6100 unsupported" in str(e):
-            print("❌ FBX version too old! Please re-download from Mixamo or convert to newer FBX format.")
-            print("   Mixamo should export FBX 7.4 binary by default now.")
-        raise e
+        bpy.ops.import_scene.fbx(filepath=fbx_path)
+    except Exception as e:
+        print(f"❌ FBX import failed: {e}")
+        return None
     
-    post_objs = set(bpy.data.objects)
-    new = list(post_objs - pre_objs)
-    arm = next((o for o in new if o.type=='ARMATURE'), None)
-    if not arm:
-        # try any armature in scene
-        arm = next((o for o in bpy.data.objects if o.type=='ARMATURE'), None)
-    if not arm:
-        raise RuntimeError("No armature found after FBX import.")
-    arm.name = "CharacterArmature"
-    return arm
-
-def get_bone(o, name):
-    return o.pose.bones.get(name)
-
-def resolve_bone(rig, name):
-    """Try to get bone with mixamorig: prefix, fallback to without prefix"""
-    pb = get_bone(rig, name)
-    if pb: return pb
-    return get_bone(rig, name.split(":")[-1])
-
-def vector_to_quat(vec, rest_axis):
-    """
-    Converts a world-space vector into a quaternion aligning rest_axis -> vec.
-    """
-    vec = vec.normalized()
-    rest_axis = rest_axis.normalized()
-    rot_axis = rest_axis.cross(vec)
-    if rot_axis.length < 1e-6:  # parallel
-        return mathutils.Quaternion()
-    rot_axis.normalize()
-    angle = rest_axis.angle(vec)
-    return mathutils.Quaternion(rot_axis, angle)
-
-
-
-def vector_to_quaternion(target_vector, bone_local_axis=(0, 1, 0)):
-    """
-    Compute quaternion to align bone_local_axis with target_vector
-    Most Mixamo bones point down their local Y-axis by default
-    """
-    if target_vector.length < 1e-6:
-        return mathutils.Quaternion()  # identity
+    # Find new objects
+    new_objects = set(bpy.data.objects) - existing_objects
     
-    local_axis = mathutils.Vector(bone_local_axis).normalized()
-    target_normalized = target_vector.normalized()
+    # Look for armature
+    armature = None
+    for obj in new_objects:
+        if obj.type == 'ARMATURE':
+            armature = obj
+            break
     
-    # Quaternion to rotate local_axis to target_normalized
-    return local_axis.rotation_difference(target_normalized)
+    # If not found in new objects, search all armatures
+    if not armature:
+        for obj in bpy.data.objects:
+            if obj.type == 'ARMATURE':
+                armature = obj
+                break
+    
+    if armature:
+        armature.name = "Mixamo_Rig"
+        print(f"✅ Imported armature: {armature.name}")
+        
+        # Find and parent meshes
+        meshes = []
+        for obj in bpy.data.objects:
+            if obj.type == 'MESH' and obj != armature:
+                # Ensure armature modifier exists
+                has_armature_mod = False
+                for mod in obj.modifiers:
+                    if mod.type == 'ARMATURE':
+                        mod.object = armature
+                        has_armature_mod = True
+                        break
+                
+                if not has_armature_mod:
+                    mod = obj.modifiers.new("Armature", 'ARMATURE')
+                    mod.object = armature
+                
+                # Parent to armature
+                obj.parent = armature
+                meshes.append(obj)
+                print(f"   └─ Linked mesh: {obj.name}")
+        
+        return armature
+    else:
+        print("❌ No armature found in FBX file")
+        return None
 
-# Global orientation correction (rotates rig from lying upside down to upright)
-GLOBAL_CORRECTION = mathutils.Euler((-1.5708, 0, 0), 'XYZ').to_quaternion()
-# Mixamo correction dictionary
-BONE_CORRECTIONS = {
-    "mixamorig:LeftArm": mathutils.Euler((0, 0, -90), 'XYZ').to_quaternion(),
-    "mixamorig:RightArm": mathutils.Euler((0, 0, 90), 'XYZ').to_quaternion(),
-    "mixamorig:Hips": mathutils.Quaternion((1,0,0,0)),  # identity
-    "mixamorig:Spine": mathutils.Quaternion((1,0,0,0)),
-    "mixamorig:LeftUpLeg": mathutils.Quaternion((1,0,0,0)),
-    "mixamorig:RightUpLeg": mathutils.Quaternion((1,0,0,0)),
-    "mixamorig:Head": mathutils.Quaternion((1,0,0,0)),
-}
-
-def apply_quaternion_animation(rig, landmark_data_world, frame_count):
-    """
-    Apply quaternion-based animation to Mixamo rig bones with improved handling
-    """
-    print(f"🎬 Applying animation to {frame_count} frames...")
-    bpy.context.view_layer.objects.active = rig
-    bpy.ops.object.mode_set(mode='POSE')
+def get_bone(armature, bone_name):
+    """Safely get bone from armature with fallback names"""
+    # Try exact name
+    if bone_name in armature.pose.bones:
+        return armature.pose.bones[bone_name]
     
-    # Clear any existing animation first
-    rig.animation_data_clear()
+    # Try without mixamorig: prefix
+    simple_name = bone_name.replace("mixamorig:", "")
+    if simple_name in armature.pose.bones:
+        return armature.pose.bones[simple_name]
     
-    # MediaPipe pose landmark indices
-    mp_indices = {
-        'nose': 0, 'left_shoulder': 11, 'right_shoulder': 12,
-        'left_elbow': 13, 'left_wrist': 15, 'right_elbow': 14, 'right_wrist': 16,
-        'left_hip': 23, 'right_hip': 24, 'left_knee': 25, 'left_ankle': 27,
-        'right_knee': 26, 'right_ankle': 28
-    }
-    
-    # Simplified bone mappings for debugging - start with just a few key bones
-    bone_mappings = [
-        ("mixamorig:Hips", 'hip_center', 'shoulder_center'),
-        ("mixamorig:Spine", 'hip_center', 'shoulder_center'),
-        ("mixamorig:LeftArm", 'left_shoulder', 'left_elbow'),
-        ("mixamorig:RightArm", 'right_shoulder', 'right_elbow'),
-        ("mixamorig:LeftUpLeg", 'left_hip', 'left_knee'),
-        ("mixamorig:RightUpLeg", 'right_hip', 'right_knee'),
+    # Try common variations
+    variations = [
+        bone_name,
+        bone_name.replace("mixamorig:", ""),
+        bone_name.replace("mixamorig:", "mixamorig2:"),
+        bone_name.lower(),
+        bone_name.upper()
     ]
     
-    print(f"🔍 DEBUG: Testing {len(bone_mappings)} key bones...")
+    for var in variations:
+        if var in armature.pose.bones:
+            return armature.pose.bones[var]
     
-    # Check which bones exist
-    existing_bones = []
-    for bone_name, from_key, to_key in bone_mappings:
-        bone = resolve_bone(rig, bone_name)
+    return None
+
+def calculate_bone_rotation(start_pos, end_pos, bone_axis=(0, 1, 0)):
+    """Calculate rotation to align bone with target direction"""
+    if (end_pos - start_pos).length < 0.001:
+        return mathutils.Quaternion()  # Identity
+    
+    target_direction = (end_pos - start_pos).normalized()
+    bone_axis_vector = mathutils.Vector(bone_axis).normalized()
+    
+    return bone_axis_vector.rotation_difference(target_direction)
+
+def apply_simple_animation(armature, landmark_data_world, frame_count):
+    """Apply animation using simple bone direction approach"""
+    print("🎬 Starting animation application...")
+    
+    # Set pose mode
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    # Clear existing animation
+    armature.animation_data_clear()
+    
+    # MediaPipe landmark indices
+    MP_INDICES = {
+        'nose': 0, 'left_eye': 1, 'right_eye': 2,
+        'left_shoulder': 11, 'right_shoulder': 12,
+        'left_elbow': 13, 'right_elbow': 14,
+        'left_wrist': 15, 'right_wrist': 16,
+        'left_hip': 23, 'right_hip': 24,
+        'left_knee': 25, 'right_knee': 26,
+        'left_ankle': 27, 'right_ankle': 28
+    }
+    
+    # Bone mappings - simplified but complete
+    BONE_MAPPINGS = [
+        # Spine chain
+        ("Hips", 'hip_center', None),  # Location only
+        ("Spine", 'hip_center', 'spine_mid'),
+        ("Spine1", 'spine_mid', 'spine_upper'),
+        ("Spine2", 'spine_upper', 'neck_base'),
+        
+        # Left Arm
+        ("LeftArm", 'left_shoulder', 'left_elbow'),
+        ("LeftForeArm", 'left_elbow', 'left_wrist'),
+        
+        # Right Arm
+        ("RightArm", 'right_shoulder', 'right_elbow'),
+        ("RightForeArm", 'right_elbow', 'right_wrist'),
+        
+        # Left Leg
+        ("LeftUpLeg", 'left_hip', 'left_knee'),
+        ("LeftLeg", 'left_knee', 'left_ankle'),
+        
+        # Right Leg
+        ("RightUpLeg", 'right_hip', 'right_knee'),
+        ("RightLeg", 'right_knee', 'right_ankle'),
+        
+        # Head
+        ("Neck", 'neck_base', 'head_base'),
+        ("Head", 'head_base', 'head_top'),
+    ]
+    
+    # Verify bone existence
+    valid_bones = []
+    for bone_name, start_point, end_point in BONE_MAPPINGS:
+        bone = get_bone(armature, bone_name)
         if bone:
-            existing_bones.append((bone_name, from_key, to_key, bone))
-            print(f"✅ Found: {bone.name}")
+            valid_bones.append((bone, bone_name, start_point, end_point))
+            print(f"   ✅ Bone found: {bone_name}")
         else:
-            print(f"❌ Missing: {bone_name}")
+            print(f"   ❌ Bone missing: {bone_name}")
     
-    if not existing_bones:
-        print("💥 ERROR: No bones found! Check bone names.")
-        # Let's see what bones ARE available
-        print("🔍 Available bones in rig:")
-        for i, bone in enumerate(rig.pose.bones):
-            if i < 20:  # Show first 20
-                print(f"   {bone.name}")
-            elif i == 20:
-                print(f"   ... and {len(rig.pose.bones)-20} more")
-                break
-        return
+    print(f"🎯 Animating {len(valid_bones)} bones over {frame_count} frames")
     
-    print(f"✅ Will animate {len(existing_bones)} bones")
-    
-    # Simple direct animation - full range
+    # Animation loop
     for frame_idx in range(frame_count):
-        frame_num = START_FRAME + frame_idx
-        bpy.context.scene.frame_set(frame_num)
-    
-        # Get landmark positions for this frame
-        landmarks = landmark_data_world[frame_idx]
-    
+        bpy.context.scene.frame_set(START_FRAME + frame_idx)
+        
+        # Get current frame landmarks
+        frame_landmarks = landmark_data_world[frame_idx]
+        
+        # Calculate derived positions
+        left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
+        right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
+        left_hip = mathutils.Vector(frame_landmarks[MP_INDICES['left_hip']])
+        right_hip = mathutils.Vector(frame_landmarks[MP_INDICES['right_hip']])
+        nose = mathutils.Vector(frame_landmarks[MP_INDICES['nose']])
+        
         # Derived positions
-        hip_center = mid(landmarks[mp_indices['left_hip']], landmarks[mp_indices['right_hip']])
-        shoulder_center = mid(landmarks[mp_indices['left_shoulder']], landmarks[mp_indices['right_shoulder']])
-    
+        hip_center = (left_hip + right_hip) * 0.5
+        shoulder_center = (left_shoulder + right_shoulder) * 0.5
+        spine_mid = (hip_center + shoulder_center) * 0.5
+        spine_upper = shoulder_center
+        neck_base = shoulder_center + (nose - shoulder_center) * 0.3
+        head_base = shoulder_center + (nose - shoulder_center) * 0.6
+        head_top = nose
+        
         positions = {
-            'hip_center': mathutils.Vector(hip_center),
-            'shoulder_center': mathutils.Vector(shoulder_center),
-            'nose': mathutils.Vector(landmarks[mp_indices['nose']]),
-            'left_shoulder': mathutils.Vector(landmarks[mp_indices['left_shoulder']]),
-            'right_shoulder': mathutils.Vector(landmarks[mp_indices['right_shoulder']]),
-            'left_elbow': mathutils.Vector(landmarks[mp_indices['left_elbow']]),
-            'left_wrist': mathutils.Vector(landmarks[mp_indices['left_wrist']]),
-            'right_elbow': mathutils.Vector(landmarks[mp_indices['right_elbow']]),
-            'right_wrist': mathutils.Vector(landmarks[mp_indices['right_wrist']]),
-            'left_hip': mathutils.Vector(landmarks[mp_indices['left_hip']]),
-            'right_hip': mathutils.Vector(landmarks[mp_indices['right_hip']]),
-            'left_knee': mathutils.Vector(landmarks[mp_indices['left_knee']]),
-            'left_ankle': mathutils.Vector(landmarks[mp_indices['left_ankle']]),
-            'right_knee': mathutils.Vector(landmarks[mp_indices['right_knee']]),
-            'right_ankle': mathutils.Vector(landmarks[mp_indices['right_ankle']]),
+            'left_shoulder': left_shoulder,
+            'right_shoulder': right_shoulder,
+            'left_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['left_elbow']]),
+            'right_elbow': mathutils.Vector(frame_landmarks[MP_INDICES['right_elbow']]),
+            'left_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['left_wrist']]),
+            'right_wrist': mathutils.Vector(frame_landmarks[MP_INDICES['right_wrist']]),
+            'left_hip': left_hip,
+            'right_hip': right_hip,
+            'left_knee': mathutils.Vector(frame_landmarks[MP_INDICES['left_knee']]),
+            'right_knee': mathutils.Vector(frame_landmarks[MP_INDICES['right_knee']]),
+            'left_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['left_ankle']]),
+            'right_ankle': mathutils.Vector(frame_landmarks[MP_INDICES['right_ankle']]),
+            'hip_center': hip_center,
+            'spine_mid': spine_mid,
+            'spine_upper': spine_upper,
+            'neck_base': neck_base,
+            'head_base': head_base,
+            'head_top': head_top,
         }
-    
-        for bone_name, from_key, to_key, bone in existing_bones:
-            from_pos = positions.get(from_key)
-            to_pos   = positions.get(to_key)
-            if from_pos is None or to_pos is None:
-                continue
-            target_vector = to_pos - from_pos
-            if target_vector.length < 1e-6:
-                continue
-    
-            # Hips: set location (converted to armature local)
-            if bone_name == "mixamorig:Hips":
-                hip_local = rig.matrix_world.inverted() @ mathutils.Vector(hip_center)
-                bone.location = hip_local
-                bone.keyframe_insert("location", frame=frame_num)
-    
-            # Put a simple rotation for now (replace with real quaternion math later)
-            # Using a small rotation proportional to frame index to ensure keyframes exist:
-            # test_rotation = mathutils.Quaternion((1, 0, 0), math.radians(5 * (frame_idx % 72)))
-            # Step: Convert landmark vector into quaternion
-            rest_axis = mathutils.Vector((0, 1, 0))  # Mixamo bones usually rest along +Y
-            quat = vector_to_quat(target_vector, rest_axis)
-            
-            # Step: Apply correction
-            corr = BONE_CORRECTIONS.get(bone_name, mathutils.Quaternion((1,0,0,0)))
-            final_quat = corr @ quat
-            
-            # Step: Insert keyframe
+        
+        # Apply to each bone
+        for bone, bone_name, start_point, end_point in valid_bones:
             bone.rotation_mode = 'QUATERNION'
-            bone.rotation_quaternion = final_quat
-            bone.keyframe_insert("rotation_quaternion", frame=frame_num)
-
-
-    # After we finish, set the scene range to match the full animation
+            
+            if bone_name == "Hips":
+                # Hips get location only
+                bone_location = armature.matrix_world.inverted() @ hip_center
+                bone.location = bone_location
+                bone.keyframe_insert(data_path="location", frame=START_FRAME + frame_idx)
+                bone.rotation_quaternion = mathutils.Quaternion()
+            elif end_point:  # Bones with direction
+                start_pos = positions.get(start_point)
+                end_pos = positions.get(end_point)
+                
+                if start_pos and end_pos:
+                    rotation = calculate_bone_rotation(start_pos, end_pos)
+                    bone.rotation_quaternion = rotation
+                else:
+                    bone.rotation_quaternion = mathutils.Quaternion()  # Identity
+            else:
+                bone.rotation_quaternion = mathutils.Quaternion()  # Identity
+            
+            bone.keyframe_insert(data_path="rotation_quaternion", frame=START_FRAME + frame_idx)
+    
+    # Set scene frame range
     bpy.context.scene.frame_start = START_FRAME
-    bpy.context.scene.frame_end   = START_FRAME + frame_count - 1
-    print(f"✅ Scene frame range set: {bpy.context.scene.frame_start}..{bpy.context.scene.frame_end}")
+    bpy.context.scene.frame_end = START_FRAME + frame_count - 1
+    print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
 
-def bake_pose(obj, f_start, f_end):
-    bpy.context.view_layer.objects.active = obj
+def bake_animation(armature, start_frame, end_frame):
+    """Bake animation to keyframes"""
+    print("🍳 Baking animation...")
+    
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    # Select all bones
+    bpy.ops.pose.select_all(action='SELECT')
+    
+    # Bake animation
     bpy.ops.nla.bake(
-        frame_start=f_start,
-        frame_end=f_end,
-        only_selected=False,
+        frame_start=start_frame,
+        frame_end=end_frame,
+        step=1,
+        only_selected=True,
         visual_keying=True,
-        clear_constraints=True,
+        clear_constraints=False,
+        clear_parents=False,
         use_current_action=True,
         bake_types={'POSE'}
     )
-
-def setup_render(fps, out_mp4, frame_end):
-    s = bpy.context.scene
-    s.render.engine = 'BLENDER_EEVEE_NEXT' 
-    s.render.fps = fps
-    s.frame_start = START_FRAME
-    s.frame_end = START_FRAME + frame_end - 1
-    s.render.image_settings.file_format = 'FFMPEG'
-    s.render.ffmpeg.format = 'MPEG4'
-    s.render.ffmpeg.codec = 'H264'
-    s.render.ffmpeg.constant_rate_factor = 'MEDIUM'
-    s.render.ffmpeg.ffmpeg_preset = 'GOOD'
-    s.render.filepath = out_mp4
-
-def check_inputs_or_die():
-    json_abs = bpy.path.abspath(JSON_PATH)
-    fbx_abs  = bpy.path.abspath(CHAR_FBX)
-    out_fbx_abs = bpy.path.abspath(OUT_FBX)
-    out_mp4_abs = bpy.path.abspath(OUT_MP4)
-
-    print("\n--- PATH CHECK ---")
-    print("JSON_PATH:", json_abs, "exists:", os.path.exists(json_abs))
-    print("CHAR_FBX :", fbx_abs,  "exists:", os.path.exists(fbx_abs))
-    print("OUT_FBX  :", out_fbx_abs)
-    print("OUT_MP4  :", out_mp4_abs)
-    print("Blend file:", bpy.data.filepath if bpy.data.filepath else "(unsaved!)")
-    print("------------------\n")
-
-    if not os.path.exists(json_abs):
-        raise FileNotFoundError(
-            f"Pose JSON not found at {json_abs}.\n"
-            "Tip: Save your .blend so // resolves correctly, or use absolute paths."
-        )
-    if not os.path.exists(fbx_abs):
-        raise FileNotFoundError(
-            f"Character FBX not found at {fbx_abs}.\n"
-            "Tip: Save your .blend so // resolves correctly, or use absolute paths."
-        )
-
-
-# ------------------- PIPELINE -------------------
-
-check_inputs_or_die()
-
-safe_clear_scene()
-ensure_camera_light()
-
-# 1) Load and smooth
-pose = load_pose_json(JSON_PATH)
-T = len(pose)
-L = len(pose[0]["landmarks"])
-arr = np.array([[[lm["x"], lm["y"], lm["z"]] for lm in f["landmarks"]] for f in pose], dtype=np.float32)
-arr_s = moving_average(arr, SMOOTH_WINDOW)
-
-print(f"🔍 Loaded pose JSON frames: {T}, landmarks per frame: {L}")
-# show indices of first and last frames (first landmark of each)
-print("First landmark sample:", pose[0]["landmarks"][0])
-print("Last landmark sample:", pose[-1]["landmarks"][0])
-
-
-# 2) Convert landmarks to world coordinates
-landmark_data_world = {}
-for frame_idx in range(T):
-    frame_landmarks = []
-    for lm_idx in range(L):
-        world_pos = norm_to_world(arr_s[frame_idx, lm_idx], sx=1, sy=1, sz=1)
-        frame_landmarks.append(world_pos)
-    landmark_data_world[frame_idx] = frame_landmarks
-
-# 3) Import character
-rig = import_mixamo(CHAR_FBX)
-print(f"✅ Mixamo rig: {rig.name}")
-
-# --- Ensure imported meshes are visible and bound to the armature ---
-imported_meshes = []
-# new objects from import may or may not be in 'new' var earlier; find meshes with no parent or with armature modifier
-for obj in bpy.data.objects:
-    if obj.type == 'MESH' and obj.name not in ("Cube",):
-        # consider it an imported mesh candidate if it shares armature modifier or is nearby
-        imported_meshes.append(obj)
-
-if not imported_meshes:
-    print("⚠️  No meshes found after FBX import. Check FBX content.")
-else:
-    print(f"🔎 Found {len(imported_meshes)} mesh(es). Making sure they use the armature...")
-for m in imported_meshes:
-    # unhide
-    m.hide_viewport = False
-    m.hide_render = False
-    m.select_set(False)
-    # ensure an armature modifier exists
-    arm_mod = None
-    for mod in m.modifiers:
-        if mod.type == 'ARMATURE':
-            arm_mod = mod
-            break
-    if arm_mod is None:
-        arm_mod = m.modifiers.new("Armature", 'ARMATURE')
-    arm_mod.object = rig
-    # parent to rig (keeps transform)
-    m.parent = rig
-    m.matrix_parent_inverse = rig.matrix_world.inverted() @ m.matrix_world
-    print(f"   ✓ Mesh '{m.name}' assigned Armature modifier -> {rig.name}")
-
-
-# 4) Auto-scale/align rig to MediaPipe data using hip/shoulder centers
-# MediaPipe indices: LShoulder=11, RShoulder=12, LHip=23, RHip=24
-mp_LS, mp_RS, mp_LH, mp_RH = 11, 12, 23, 24
-
-# Get first-frame positions to estimate scale
-first_frame = landmark_data_world[0]
-p_ls = mathutils.Vector(first_frame[mp_LS])
-p_rs = mathutils.Vector(first_frame[mp_RS])
-p_lh = mathutils.Vector(first_frame[mp_LH])
-p_rh = mathutils.Vector(first_frame[mp_RH])
-
-mp_shoulder_center = (p_ls + p_rs) / 2
-mp_hip_center = (p_lh + p_rh) / 2
-mp_torso_len = (mp_shoulder_center - mp_hip_center).length
-
-# Character rig distances
-hips = get_bone(rig, "mixamorig:Hips") or get_bone(rig, "Hips")
-neck = get_bone(rig, "mixamorig:Neck") or get_bone(rig, "Neck") \
-       or get_bone(rig, "mixamorig:Spine2") or get_bone(rig, "Spine2")
-
-if hips and neck:
-    rig_hips_w = rig.matrix_world @ hips.head
-    rig_neck_w = rig.matrix_world @ neck.head
-    rig_torso_len = (rig_neck_w - rig_hips_w).length
     
-    if mp_torso_len > 1e-6 and rig_torso_len > 1e-6:
-        scale = rig_torso_len / mp_torso_len
-        rig.scale = (scale, scale, scale)
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    print("✅ Baking complete")
 
-    # Position rig at MediaPipe hip center
-    rig.location = mp_hip_center
-    bpy.ops.object.transform_apply(location=True, rotation=False, scale=False)
+def setup_render_settings(fps, output_path, frame_end):
+    """Configure render settings"""
+    scene = bpy.context.scene
+    scene.render.engine = 'BLENDER_EEVEE'
+    scene.render.fps = fps
+    scene.frame_start = START_FRAME
+    scene.frame_end = START_FRAME + frame_end - 1
+    scene.render.resolution_x = 1280
+    scene.render.resolution_y = 720
+    
+    if RENDER_PREVIEW:
+        scene.render.image_settings.file_format = 'FFMPEG'
+        scene.render.ffmpeg.format = 'MPEG4'
+        scene.render.ffmpeg.codec = 'H264'
+        scene.render.ffmpeg.constant_rate_factor = 'MEDIUM'
+        scene.render.filepath = output_path
 
-# 5) Apply quaternion-based animation (NEW APPROACH)
-apply_quaternion_animation(rig, landmark_data_world, T)
+def export_animated_fbx(armature, output_path):
+    """Export character with animation"""
+    print("📤 Exporting FBX...")
+    
+    # Select armature and all its children
+    bpy.ops.object.select_all(action='DESELECT')
+    armature.select_set(True)
+    
+    # Select all meshes parented to armature
+    for obj in bpy.data.objects:
+        if obj.parent == armature and obj.type == 'MESH':
+            obj.select_set(True)
+    
+    bpy.context.view_layer.objects.active = armature
+    
+    # Export settings
+    bpy.ops.export_scene.fbx(
+        filepath=output_path,
+        use_selection=True,
+        apply_scale_options='FBX_SCALE_ALL',
+        bake_anim=True,
+        bake_anim_use_all_bones=True,
+        bake_anim_use_nla_strips=False,
+        bake_anim_use_all_actions=False,
+        add_leaf_bones=False,
+        mesh_smooth_type='FACE'
+    )
+    
+    print(f"✅ FBX exported: {output_path}")
 
-# 6) Bake to the character rig
-frame_end = T
-bake_pose(rig, START_FRAME, START_FRAME + frame_end - 1)
+def check_input_files():
+    """Verify all required files exist"""
+    json_path = bpy.path.abspath(JSON_PATH)
+    fbx_path = bpy.path.abspath(CHAR_FBX)
+    
+    print("\n🔍 Checking input files...")
+    print(f"   JSON: {json_path} - {'✅ EXISTS' if os.path.exists(json_path) else '❌ MISSING'}")
+    print(f"   FBX:  {fbx_path} - {'✅ EXISTS' if os.path.exists(fbx_path) else '❌ MISSING'}")
+    
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Pose JSON not found: {json_path}")
+    if not os.path.exists(fbx_path):
+        raise FileNotFoundError(f"Character FBX not found: {fbx_path}")
 
-# 7) Export FBX (select rig + meshes)
-bpy.ops.object.mode_set(mode='OBJECT', toggle=False)  # ensure OBJECT mode
+# ------------------- MAIN PIPELINE -------------------
+def main():
+    try:
+        print("🚀 Starting Mixamo Auto-Rigger...")
+        
+        # 1. Check inputs
+        check_input_files()
+        
+        # 2. Clear scene
+        safe_clear_scene()
+        
+        # 3. Setup scene
+        ensure_camera_light()
+        
+        # 4. Load and process pose data
+        pose_data = load_pose_json(JSON_PATH)
+        total_frames = len(pose_data)
+        landmarks_per_frame = len(pose_data[0]["landmarks"])
+        
+        print(f"📊 Processing {total_frames} frames with {landmarks_per_frame} landmarks each")
+        
+        # Convert to numpy array
+        raw_landmarks = np.array([
+            [[lm["x"], lm["y"], lm["z"]] for lm in frame["landmarks"]] 
+            for frame in pose_data
+        ], dtype=np.float32)
+        
+        # Smooth data
+        smoothed_landmarks = moving_average(raw_landmarks, SMOOTH_WINDOW)
+        
+        # Convert to world coordinates
+        landmark_data_world = []
+        for frame_idx in range(total_frames):
+            frame_world = []
+            for lm_idx in range(landmarks_per_frame):
+                world_pos = norm_to_world(smoothed_landmarks[frame_idx, lm_idx])
+                frame_world.append(world_pos)
+            landmark_data_world.append(frame_world)
+        
+        print("✅ Pose data processed")
+        
+        # 5. Import character
+        armature = import_mixamo_character(CHAR_FBX)
+        if not armature:
+            print("❌ Failed to import character")
+            return
+        
+        # 6. Position character
+        armature.location = (0, 0, 0)
+        armature.rotation_euler = (0, 0, 0)
+        
+        # 7. Apply animation
+        apply_simple_animation(armature, landmark_data_world, total_frames)
+        
+        # 8. Bake animation
+        bake_animation(armature, START_FRAME, START_FRAME + total_frames - 1)
+        
+        # 9. Export FBX
+        export_animated_fbx(armature, OUT_FBX)
+        
+        # 10. Setup and render MP4
+        if RENDER_PREVIEW:
+            setup_render_settings(FPS, OUT_MP4, total_frames)
+            print("🎥 Rendering animation preview...")
+            bpy.ops.render.render(animation=True)
+            print(f"✅ MP4 rendered: {OUT_MP4}")
+        
+        print("\n🎉 PIPELINE COMPLETE! 🎉")
+        print(f"   FBX: {OUT_FBX}")
+        if RENDER_PREVIEW:
+            print(f"   MP4: {OUT_MP4}")
+            
+    except Exception as e:
+        print(f"❌ ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-# Deselect everything safely (without bpy.ops)
-for obj in bpy.context.selected_objects:
-    obj.select_set(False)
-
-# Select rig + imported meshes
-rig.select_set(True)
-for m in imported_meshes:
-    m.select_set(True)
-
-# Set rig as active
-bpy.context.view_layer.objects.active = rig
-
-print(f"\nFBX export starting… '{OUT_FBX}'")
-bpy.ops.export_scene.fbx(
-    filepath=OUT_FBX,
-    use_selection=True,
-    bake_anim=True,
-    add_leaf_bones=False,
-    bake_anim_use_nla_strips=False,
-    bake_anim_use_all_actions=False
-)
-print(f"✅ FBX written: {OUT_FBX}")
-
-# 8) (Optional) MP4 preview render
-if RENDER_PREVIEW:
-    ensure_camera_light()
-    setup_render(FPS, OUT_MP4, frame_end)
-    print(f"\n🎥 Rendering MP4 preview to '{OUT_MP4}' …")
-    bpy.ops.render.render(animation=True)
-    print(f"✅ MP4 written: {OUT_MP4}")
+# Run the pipeline
+if __name__ == "__main__":
+    main()
