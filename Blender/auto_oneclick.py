@@ -1,4 +1,4 @@
-# Blender/auto_oneclick.py - AXIS FIXED VERSION
+# Blender/auto_oneclick.py - SYSTEMATIC AXIS TESTING
 import bpy, json, os, math
 import numpy as np
 import mathutils
@@ -7,17 +7,26 @@ import mathutils
 JSON_PATH   = "output/pose_data.json"
 CHAR_FBX    = "assets/Remy.fbx"
 OUT_FBX     = "output/animated_character.fbx"
-OUT_MP4     = "output/anim_preview.mp4"
 
 VIDEO_W, VIDEO_H = 640, 480
-SCALE          = 0.08  # Increased scale for better visibility
+SCALE          = 0.08
 START_FRAME    = 1
 SMOOTH_WINDOW  = 5
-FPS            = 30
-RENDER_PREVIEW = False
+USE_FRAMES     = 100  # Reduced for faster testing
+ROTATION_STRENGTH = 0.8  # 80% strength for clear motion
 
-USE_FRAMES = 60  # Use 60 frames to see the motion
-ROTATION_STRENGTH = 0.6  # Increased to 60% - more visible motion
+# AXIS MAPPING OPTIONS - WE'LL TRY THEM ALL
+AXIS_OPTIONS = {
+    "OPTION_1": {"desc": "MP X→X, MP Y→Z, MP Z→-Y", "func": lambda x, y, z: (x, -z, y)},
+    "OPTION_2": {"desc": "MP X→X, MP Y→Z, MP Z→Y", "func": lambda x, y, z: (x, z, y)},
+    "OPTION_3": {"desc": "MP X→X, MP Y→-Z, MP Z→Y", "func": lambda x, y, z: (x, z, -y)},
+    "OPTION_4": {"desc": "MP X→-X, MP Y→Z, MP Z→Y", "func": lambda x, y, z: (-x, z, y)},
+    "OPTION_5": {"desc": "MP X→Y, MP Y→Z, MP Z→X", "func": lambda x, y, z: (y, x, z)},
+    "OPTION_6": {"desc": "MP X→-Y, MP Y→Z, MP Z→X", "func": lambda x, y, z: (-y, x, z)},
+}
+
+# SELECT WHICH OPTION TO TEST (change this number to test different options)
+SELECTED_OPTION = 1  # Change this from 1 to 6 to test different mappings
 # ------------------------------------------------
 
 def safe_clear_scene():
@@ -39,34 +48,39 @@ def moving_average(arr, win):
         smoothed[i] = np.mean(padded[i:i+win], axis=0)
     return smoothed
 
-def norm_to_world(lm, scale_x=1, scale_y=1, scale_z=1):
-    """FIXED COORDINATE SYSTEM: MediaPipe to Blender conversion"""
-    # MediaPipe: X=left/right, Y=up/down, Z=forward/backward
-    # Blender: X=left/right, Y=forward/backward, Z=up/down
+def norm_to_world(lm, axis_option):
+    """Convert using selected axis mapping"""
+    # Normalized MediaPipe coordinates
+    mp_x = (lm[0] - 0.5) * VIDEO_W * SCALE
+    mp_y = (lm[1] - 0.5) * VIDEO_H * SCALE  
+    mp_z = lm[2] * VIDEO_W * SCALE
     
-    # Convert MediaPipe to Blender coordinates:
-    x = (lm[0] - 0.5) * VIDEO_W * SCALE * scale_x  # X stays same
-    z = (0.5 - lm[1]) * VIDEO_H * SCALE * scale_y  # MediaPipe Y -> Blender Z (UP)
-    y = -lm[2] * VIDEO_W * SCALE * scale_z         # MediaPipe Z -> Blender Y (forward)
-    
-    return (x, z, y)  # Swapped Y and Z!
+    # Apply selected axis mapping
+    option_key = f"OPTION_{SELECTED_OPTION}"
+    if option_key in AXIS_OPTIONS:
+        mapping_func = AXIS_OPTIONS[option_key]["func"]
+        blender_x, blender_y, blender_z = mapping_func(mp_x, mp_y, mp_z)
+        return (blender_x, blender_y, blender_z)
+    else:
+        # Default fallback
+        return (mp_x, mp_z, mp_y)
 
 def ensure_camera_light():
     if "AutoCamera" not in bpy.data.objects:
-        bpy.ops.object.camera_add(location=(8, -12, 6))  # Better camera position
+        bpy.ops.object.camera_add(location=(6, -8, 4))
         cam = bpy.context.object
         cam.name = "AutoCamera"
     else:
         cam = bpy.data.objects["AutoCamera"]
-    cam.location = (8, -12, 6)
-    cam.rotation_euler = (1.1, 0, 0.6)
+    cam.location = (6, -8, 4)
+    cam.rotation_euler = (1.2, 0, 0.7)
     bpy.context.scene.camera = cam
     
     if "AutoLight" not in bpy.data.objects:
-        bpy.ops.object.light_add(type='SUN', location=(10, -10, 15))
+        bpy.ops.object.light_add(type='SUN', location=(5, -5, 8))
         light = bpy.context.object
         light.name = "AutoLight"
-        light.data.energy = 4.0
+        light.data.energy = 3.0
 
 def import_mixamo_character(fbx_path):
     existing_objects = set(bpy.data.objects)
@@ -95,7 +109,6 @@ def import_mixamo_character(fbx_path):
         armature.name = "Mixamo_Rig"
         print(f"✅ Imported armature: {armature.name}")
         
-        meshes = []
         for obj in bpy.data.objects:
             if obj.type == 'MESH' and obj != armature:
                 has_armature_mod = False
@@ -108,8 +121,6 @@ def import_mixamo_character(fbx_path):
                     mod = obj.modifiers.new("Armature", 'ARMATURE')
                     mod.object = armature
                 obj.parent = armature
-                meshes.append(obj)
-                print(f"   └─ Linked mesh: {obj.name}")
         
         return armature
     else:
@@ -117,29 +128,21 @@ def import_mixamo_character(fbx_path):
         return None
 
 def get_bone_rest_direction(armature, bone_name):
-    """Get bone direction in armature's local space"""
     bone = armature.data.bones[bone_name]
     return (bone.tail_local - bone.head_local).normalized()
 
 def calculate_proper_rotation(armature, bone_name, target_direction_world):
-    """Calculate rotation with proper axis handling"""
-    
-    # Get bone's rest direction in local space
     bone_rest_direction_local = get_bone_rest_direction(armature, bone_name)
-    
-    # Convert target direction from world to armature local space
     armature_matrix = armature.matrix_world
     target_direction_local = armature_matrix.inverted().to_3x3() @ target_direction_world.normalized()
     
-    # Calculate rotation in local space
     if target_direction_local.length > 0.001 and bone_rest_direction_local.length > 0.001:
         return bone_rest_direction_local.rotation_difference(target_direction_local)
     else:
         return mathutils.Quaternion()
 
-def apply_corrected_animation(armature, landmark_data_world, frame_count):
-    """Animation with CORRECTED AXIS handling"""
-    print("🎬 Starting AXIS-CORRECTED animation...")
+def apply_animation(armature, landmark_data_world, frame_count):
+    print(f"🎬 Testing AXIS OPTION {SELECTED_OPTION}")
     
     bpy.context.view_layer.objects.active = armature
     bpy.ops.object.mode_set(mode='POSE')
@@ -154,16 +157,11 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
         'left_ankle': 27, 'right_ankle': 28
     }
     
-    # ANIMATE THESE BONES - with better motion
     ANIMATED_BONES = [
         "mixamorig:LeftArm", "mixamorig:RightArm",
         "mixamorig:LeftForeArm", "mixamorig:RightForeArm", 
         "mixamorig:LeftUpLeg", "mixamorig:RightUpLeg",
-        "mixamorig:LeftLeg", "mixamorig:RightLeg"
     ]
-    
-    print(f"🎯 Animating {len(ANIMATED_BONES)} bones over {USE_FRAMES} frames")
-    print(f"🔧 Rotation strength: {ROTATION_STRENGTH * 100}%")
     
     for frame_idx in range(min(USE_FRAMES, frame_count)):
         frame_num = START_FRAME + frame_idx
@@ -171,7 +169,7 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
         
         frame_landmarks = landmark_data_world[frame_idx]
         
-        # Get landmark positions (now in correct Blender coordinates)
+        # Get positions with current axis mapping
         left_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['left_shoulder']])
         right_shoulder = mathutils.Vector(frame_landmarks[MP_INDICES['right_shoulder']])
         left_elbow = mathutils.Vector(frame_landmarks[MP_INDICES['left_elbow']])
@@ -182,10 +180,7 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
         right_hip = mathutils.Vector(frame_landmarks[MP_INDICES['right_hip']])
         left_knee = mathutils.Vector(frame_landmarks[MP_INDICES['left_knee']])
         right_knee = mathutils.Vector(frame_landmarks[MP_INDICES['right_knee']])
-        left_ankle = mathutils.Vector(frame_landmarks[MP_INDICES['left_ankle']])
-        right_ankle = mathutils.Vector(frame_landmarks[MP_INDICES['right_ankle']])
         
-        # Apply to each bone
         for bone_name in ANIMATED_BONES:
             if bone_name not in armature.pose.bones:
                 continue
@@ -193,7 +188,6 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
             bone = armature.pose.bones[bone_name]
             bone.rotation_mode = 'QUATERNION'
             
-            # Calculate target directions
             if bone_name == "mixamorig:LeftArm":
                 target_dir = (left_elbow - left_shoulder)
             elif bone_name == "mixamorig:RightArm":
@@ -206,17 +200,11 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
                 target_dir = (left_knee - left_hip)
             elif bone_name == "mixamorig:RightUpLeg":
                 target_dir = (right_knee - right_hip)
-            elif bone_name == "mixamorig:LeftLeg":
-                target_dir = (left_ankle - left_knee)
-            elif bone_name == "mixamorig:RightLeg":
-                target_dir = (right_ankle - right_knee)
             else:
                 continue
             
-            # Apply rotation with proper strength
             if target_dir.length > 0.1:
                 rotation = calculate_proper_rotation(armature, bone_name, target_dir)
-                # Apply the rotation with our strength setting
                 final_rotation = rotation.slerp(mathutils.Quaternion(), 1.0 - ROTATION_STRENGTH)
                 bone.rotation_quaternion = final_rotation
             else:
@@ -226,7 +214,6 @@ def apply_corrected_animation(armature, landmark_data_world, frame_count):
     
     bpy.context.scene.frame_start = START_FRAME
     bpy.context.scene.frame_end = START_FRAME + min(USE_FRAMES, frame_count) - 1
-    print(f"📊 Frame range: {bpy.context.scene.frame_start} - {bpy.context.scene.frame_end}")
 
 def bake_animation(armature, start_frame, end_frame):
     print("🍳 Baking animation...")
@@ -245,7 +232,6 @@ def bake_animation(armature, start_frame, end_frame):
         use_current_action=True,
         bake_types={'POSE'}
     )
-    print("✅ Baking complete")
 
 def export_animated_fbx(armature, output_path):
     print("📤 Exporting FBX...")
@@ -270,30 +256,31 @@ def export_animated_fbx(armature, output_path):
         add_leaf_bones=False,
         mesh_smooth_type='FACE'
     )
-    print(f"✅ FBX exported: {output_path}")
-
-def check_input_files():
-    print("\n🔍 Checking input files...")
-    print(f"   JSON: {JSON_PATH} - {'✅ EXISTS' if os.path.exists(JSON_PATH) else '❌ MISSING'}")
-    print(f"   FBX:  {CHAR_FBX} - {'✅ EXISTS' if os.path.exists(CHAR_FBX) else '❌ MISSING'}")
-    if not os.path.exists(JSON_PATH):
-        raise FileNotFoundError(f"Pose JSON not found: {JSON_PATH}")
-    if not os.path.exists(CHAR_FBX):
-        raise FileNotFoundError(f"Character FBX not found: {CHAR_FBX}")
 
 def main():
     try:
-        print("🚀 Starting AXIS-FIXED Mixamo Auto-Rigger...")
-        print("🎯 TARGET: Jumping Jacks motion in correct vertical plane")
-        check_input_files()
+        option_key = f"OPTION_{SELECTED_OPTION}"
+        option_desc = AXIS_OPTIONS[option_key]["desc"] if option_key in AXIS_OPTIONS else "UNKNOWN"
+        
+        print("🚀 SYSTEMATIC AXIS TESTING")
+        print(f"🎯 TESTING OPTION {SELECTED_OPTION}: {option_desc}")
+        print("📋 Available options:")
+        for i in range(1, 7):
+            key = f"OPTION_{i}"
+            if key in AXIS_OPTIONS:
+                print(f"   {i}. {AXIS_OPTIONS[key]['desc']}")
+        
+        # Check files
+        if not os.path.exists(JSON_PATH):
+            raise FileNotFoundError(f"JSON not found: {JSON_PATH}")
+        if not os.path.exists(CHAR_FBX):
+            raise FileNotFoundError(f"FBX not found: {CHAR_FBX}")
+        
         safe_clear_scene()
         ensure_camera_light()
         
         pose_data = load_pose_json(JSON_PATH)
         total_frames = len(pose_data)
-        landmarks_per_frame = len(pose_data[0]["landmarks"])
-        
-        print(f"📊 Processing {total_frames} frames with {landmarks_per_frame} landmarks each")
         
         raw_landmarks = np.array([
             [[lm["x"], lm["y"], lm["z"]] for lm in frame["landmarks"]] 
@@ -305,39 +292,32 @@ def main():
         landmark_data_world = []
         for frame_idx in range(total_frames):
             frame_world = []
-            for lm_idx in range(landmarks_per_frame):
-                world_pos = norm_to_world(smoothed_landmarks[frame_idx, lm_idx])
+            for lm_idx in range(len(pose_data[0]["landmarks"])):
+                world_pos = norm_to_world(smoothed_landmarks[frame_idx, lm_idx], option_key)
                 frame_world.append(world_pos)
             landmark_data_world.append(frame_world)
         
-        print("✅ Pose data processed with CORRECTED AXIS")
+        print("✅ Pose data processed")
         
         armature = import_mixamo_character(CHAR_FBX)
         if not armature:
-            print("❌ Failed to import character")
             return
         
-        # Reset character position
         armature.location = (0, 0, 0)
         armature.rotation_euler = (0, 0, 0)
         
-        # Apply AXIS-CORRECTED animation
-        apply_corrected_animation(armature, landmark_data_world, total_frames)
-        
-        # Bake and export
+        apply_animation(armature, landmark_data_world, total_frames)
         bake_frames = min(USE_FRAMES, total_frames)
         bake_animation(armature, START_FRAME, START_FRAME + bake_frames - 1)
         export_animated_fbx(armature, OUT_FBX)
         
-        print("\n🎉 AXIS-FIXED PIPELINE COMPLETE! 🎉")
+        print(f"\n🎉 OPTION {SELECTED_OPTION} COMPLETE!")
         print(f"   FBX: {OUT_FBX}")
-        print("   🔧 CRITICAL FIXES APPLIED:")
-        print("   ✅ MediaPipe Y (up/down) → Blender Z (up/down)")
-        print("   ✅ MediaPipe Z (forward) → Blender Y (forward)") 
-        print("   ✅ Increased rotation strength to 60%")
-        print("   ✅ Using 60 frames for clear motion")
-        print("   ✅ Better camera angle to see vertical motion")
-        print("   🎯 Expected: Arms/legs should move UP/DOWN in jumping jacks!")
+        print(f"   Mapping: {option_desc}")
+        print("\n🔍 CHECK THE RESULT:")
+        print("   - Do arms move UP/DOWN for jumping jacks?")
+        print("   - Is motion in the correct vertical plane?")
+        print("   - If not, change SELECTED_OPTION and run again!")
             
     except Exception as e:
         print(f"❌ ERROR: {str(e)}")
